@@ -99,6 +99,7 @@ export function createLocalFileStore(dir) {
   return {
     kind: "local",
     dir,
+    docs: mem.docs,
     flush: flushNow,
     getDoc: mem.getDoc,
     list: mem.list,

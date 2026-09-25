@@ -2,7 +2,8 @@ import P from "pino";
 import QRCode from "qrcode";
 import makeWASocket, { fetchLatestBaileysVersion, normalizeMessageContent } from "@whiskeysockets/baileys";
 import { useFirestoreAuthState, clearSession } from "./firestoreAuthState.js";
-import { DATABASE_ID, getProjectId, getDb } from "./firebaseAdmin.js";
+import { DATABASE_ID, getProjectId } from "./firebaseAdmin.js";
+import { claimsDb } from "./store/claimsDb.js";
 import { reconnectPlan } from "./reconnect.js";
 import { claimSend, completeSend, releaseSend } from "./sendOnce.js";
 
@@ -476,7 +477,7 @@ export async function sendMessage({ phone, jid: directJid, message, pdfBase64, f
      which is exactly when a slow send gets retried. */
   let db = null;
   if (clientMessageId) {
-    db = getDb();
+    db = claimsDb();
     const claim = await claimSend(db, clientMessageId);
     if (claim.state === "done") {
       return { deduped: true, acknowledged: true, messageId: claim.result?.messageId ?? null };

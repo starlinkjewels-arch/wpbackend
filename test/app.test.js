@@ -294,6 +294,17 @@ async function drain(id, max = 50) {
   rmSync(dir, { recursive: true, force: true });
 }
 
+/* ══════ Never twice, without Firebase ═════════════════════════════════ */
+{
+  const { claimsDb } = await import("../src/store/claimsDb.js");
+  const { claimSend, completeSend } = await import("../src/sendOnce.js");
+  const db = claimsDb();
+  const [a, b] = await Promise.all([claimSend(db, "c_x_1", 1), claimSend(db, "c_x_1", 1)]);
+  assert([a, b].filter((r) => r.state === "claimed").length === 1, "with local data, two simultaneous sends of one message: one wins");
+  await completeSend(db, "c_x_1", { messageId: "M" }, 2);
+  assert((await claimSend(db, "c_x_1", 3)).state === "done", "and a retry after it went out is answered, not resent");
+}
+
 console.log(`\n  ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   for (const f of failures) console.log("  ✗ " + f);
