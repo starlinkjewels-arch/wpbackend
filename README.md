@@ -43,7 +43,7 @@ one session stop messages being delivered).
 | `DATA_STORE` | no | `local` (default — JSON files in `DATA_DIR`) or `firestore`. **Use `firestore` on Render.** |
 | `DATA_DIR` | no | Folder for local data. Default `./data` (`./data-demo` in demo mode). |
 | `FIREBASE_SERVICE_ACCOUNT_KEY` | yes* | The service-account JSON on one line. *Or* `FIREBASE_SERVICE_ACCOUNT_PATH` pointing at the file (handy locally). |
-| `FIRESTORE_DATABASE_ID` | no | The named database. Default `starlinkbilling`. |
+| `FIRESTORE_DATABASE_ID` | no | The named database. Default `wpserver`. |
 | `WA_SESSION_ID` | no | Which saved WhatsApp session. Default `default`. |
 | `DEMO_MODE` | no | `1` for the pretend WhatsApp and sample data. |
 | `PORT` | no | Default 3000; hosts set this. |

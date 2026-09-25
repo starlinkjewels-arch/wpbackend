@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 // database in a different Firebase project, so this cannot be a constant that
 // only a redeploy can change. Set FIRESTORE_DATABASE_ID on the host; the
 // default is what this service was pinned to before it was configurable.
-export const DATABASE_ID = process.env.FIRESTORE_DATABASE_ID || "starlinkbilling";
+export const DATABASE_ID = process.env.FIRESTORE_DATABASE_ID || "wpserver";
 
 let dbInstance = null;
 let serviceAccountProjectId = null;
