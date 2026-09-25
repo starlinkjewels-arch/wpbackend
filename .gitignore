@@ -1,0 +1,9 @@
+node_modules/
+auth_info/
+*.log
+.env
+# Local data (DATA_STORE=local) — client lists are personal data, never commit them
+data/
+data-demo/
+# Firebase service-account keys are passwords to the whole project
+*firebase-adminsdk*.json

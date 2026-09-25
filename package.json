@@ -1,0 +1,28 @@
+{
+  "name": "wpsendmassage",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WhatsApp B2B campaign service for Starlink Jewels — clients, Excel import, scheduled personalised campaigns, inbox (Baileys, own-number QR link)",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "demo": "node --env-file-if-exists=.env src/demo.js",
+    "test": "node test/failures.test.js && node test/app.test.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.21.1",
+    "firebase-admin": "^13.0.1",
+    "libphonenumber-js": "^1.13.14",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  },
+  "engines": {
+    "node": ">=22.9"
+  }
+}
