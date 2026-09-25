@@ -52,8 +52,10 @@ one session stop messages being delivered).
 tests need nothing.
 
 All app collections in Firestore start with `wa` (`waContacts`,
-`waCampaigns`, …). The database is shared with the billing app, which already
-has collections such as `settings` — the prefix keeps the two apart.
+`waCampaigns`, …) and live in their own database, `wpserver`, separate from the
+billing app's `starlinkbilling`. The prefix is kept anyway, so pointing
+`FIRESTORE_DATABASE_ID` at a shared database can never collide with collections
+such as `settings`.
 
 **The service account and the database must belong to the same project.** They
 are set independently, so they can drift apart — and when they do, Firestore

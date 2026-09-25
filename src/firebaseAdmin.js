@@ -1,14 +1,14 @@
 import admin from "firebase-admin";
 import { readFileSync } from "node:fs";
 
-// Same project + named database the AIM frontend itself uses — see
-// src/lib/firebase.ts (DATABASE_ID) and src/lib/teamAdmin.ts in the main app.
-// Must match exactly, or this writes into a database the app never looks at.
+// The WhatsApp service has its own named database, "wpserver", in the same
+// Firebase project as the billing app but apart from the billing app's own
+// database — the session, clients and campaigns never share a collection
+// with invoices. Nothing here reads the billing data, so the two need not match.
 //
 // One codebase serves more than one shop, and each shop is a different named
 // database in a different Firebase project, so this cannot be a constant that
-// only a redeploy can change. Set FIRESTORE_DATABASE_ID on the host; the
-// default is what this service was pinned to before it was configurable.
+// only a redeploy can change. Set FIRESTORE_DATABASE_ID on the host.
 export const DATABASE_ID = process.env.FIRESTORE_DATABASE_ID || "wpserver";
 
 let dbInstance = null;
