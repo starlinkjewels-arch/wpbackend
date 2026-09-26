@@ -8,6 +8,7 @@ import { loadAll, dataState } from "./data/collections.js";
 import { seedTemplatesIfEmpty } from "./data/templates.js";
 import { startRunner } from "./engine/runner.js";
 import { startInbound } from "./engine/inbound.js";
+import { startTracking } from "./engine/tracking.js";
 
 const PORT = process.env.PORT || 3000;
 const app = express();
@@ -215,6 +216,7 @@ async function bootData(attempt = 0) {
 if (DEMO_MODE) console.log("[demo] DEMO_MODE is on — pretend WhatsApp, sample data");
 console.log(`[data] store: ${STORE_KIND}${getStore().dir ? " (" + getStore().dir + ")" : ""}`);
 startInbound();
+startTracking();
 bootData();
 wa.startSafely();
 const server = app.listen(PORT, () =>

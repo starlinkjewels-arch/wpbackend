@@ -21,6 +21,31 @@ What it does:
   `src/ai/writer.js`; the admin manages model, tone, language, business facts
   and the key in Settings → AI writer.
 
+### Sending safety (Settings → Sending safety)
+
+WhatsApp publishes no daily limit for a normal number; it watches behaviour.
+The runner (`src/engine/runner.js`) therefore layers what bulk-sending guides
+agree on:
+
+- **Daily limit** (default 300) and **warm-up**: a new number starts at
+  `startLimit` (30) and adds `step` (20) a day up to the limit (`rules.js → dailyCap`).
+- **Sending hours**, either the business's clock or **each client's local
+  time** (country → zone, `engine/timezones.js`), optionally **skipping
+  weekends** — Friday–Saturday for the Gulf and Israel, Saturday–Sunday elsewhere.
+- **Random gap** between messages, a **safety break** of a few minutes after
+  every N messages, and **"typing…"** shown before each message.
+- **Skip clients who ignore campaigns** (N in a row without a reply), because
+  WhatsApp now caps monthly messages to people who never answer.
+- **Check on WhatsApp** (Clients → select → ⋯): verifies numbers one every
+  ~2.5 s before a campaign (`engine/verify.js`).
+
+After sending, `engine/tracking.js` records **delivered / read** receipts and
+**replies / opt-outs within 7 days**, per client and per campaign; the campaign
+page offers one-click **follow-ups** to "no reply", "read, no reply" or
+"replied". `engine/health.js` turns the last 30 days into the **Account
+health** card on Home (reply, read, opt-out and failure rates, unanswered
+messages this month, and what to fix).
+
 ### How AI-personalised campaigns send
 
 For each client the runner uses, in order: the message the admin **edited**

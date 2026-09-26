@@ -30,6 +30,23 @@ const listeners = new Set();
 const sentIds = new Set();
 let timer = null;
 
+const statusListeners = new Set();
+
+export function onStatus(fn) {
+  statusListeners.add(fn);
+  return () => statusListeners.delete(fn);
+}
+
+function emitStatus(entry) {
+  for (const fn of statusListeners) Promise.resolve().then(() => fn(entry)).catch(() => {});
+}
+
+export async function checkNumber(phone) {
+  if (state.status !== "connected") throw fail("WhatsApp not connected", "NOT_CONNECTED");
+  await sleep(150);
+  return !String(phone).replace(/\D/g, "").endsWith("000");
+}
+
 export function onIncoming(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);
@@ -90,7 +107,7 @@ const REPLIES = [
   "Please call me tomorrow",
 ];
 
-export async function sendMessage({ phone, jid, message, media, pdfBase64, clientMessageId }) {
+export async function sendMessage({ phone, jid, message, media, pdfBase64, clientMessageId, typingMs = 0 }) {
   if (!message && !media && !pdfBase64) throw fail("Provide `message` and/or `pdfBase64`", "BAD_REQUEST");
   if (state.status !== "connected") throw fail("WhatsApp not connected — scan the QR code first", "NOT_CONNECTED");
   if (clientMessageId && sentIds.has(clientMessageId)) return { deduped: true, acknowledged: true, messageId: null };
@@ -99,8 +116,14 @@ export async function sendMessage({ phone, jid, message, media, pdfBase64, clien
   const digits = String(phone ?? jid ?? "").replace(/\D/g, "");
   if (digits.endsWith("000")) throw fail(`${phone} is not on WhatsApp — check the number saved for this party`, "NOT_ON_WHATSAPP");
 
+  if (typingMs) await sleep(Math.min(typingMs, 1500));
   const messageId = "DEMO" + Math.random().toString(36).slice(2, 12).toUpperCase();
   if (clientMessageId) sentIds.add(clientMessageId);
+
+  // Their phone receives it, and most people open it.
+  const target = toJid(digits);
+  setTimeout(() => emitStatus({ id: messageId, status: 3, jid: target }), 800 + Math.random() * 2500).unref?.();
+  if (Math.random() < 0.7) setTimeout(() => emitStatus({ id: messageId, status: 4, jid: target }), 4000 + Math.random() * 25000).unref?.();
 
   // Some clients write back. Not to our own number, and not to test sends.
   if (digits !== DEMO_PHONE && clientMessageId?.startsWith("c_") && Math.random() < 0.18) {

@@ -374,6 +374,124 @@ async function drain(id, max = 50) {
   setTransport(null);
 }
 
+/* ══════ Safer sending: warm-up, weekends, local time, breaks ══════════ */
+{
+  const { dailyCap, isOpen, nextOpen } = await import("../src/engine/rules.js");
+  const { weekendFor, timezoneFor } = await import("../src/engine/timezones.js");
+
+  // Warm-up: 30 on day one, +20 a day, never above the daily limit.
+  const base = { dailyLimit: 300, timezone: "Asia/Kolkata", warmup: { enabled: true, startLimit: 30, step: 20, startedAt: Date.UTC(2026, 8, 1, 6) } };
+  assert(dailyCap(base, Date.UTC(2026, 8, 1, 12)).limit === 30, "warm-up day 1 allows the starting amount");
+  const d3 = dailyCap(base, Date.UTC(2026, 8, 3, 12));
+  assert(d3.limit === 70 && d3.day === 3, "day 3 allows 70 — got " + JSON.stringify(d3));
+  assert(dailyCap(base, Date.UTC(2026, 9, 30, 12)).limit === 300 && d3.fullOnDay === 15, "and reaches the full daily limit on day 15, never beyond");
+  assert(dailyCap({ ...base, warmup: { enabled: false } }).limit === 300, "without warm-up the daily limit applies as set");
+
+  // Weekends differ: Friday 2 Oct 2026, 11:00 in Riyadh and in Dubai.
+  const friday = Date.UTC(2026, 9, 2, 8);
+  const w = { enabled: true, start: "09:00", end: "18:00", skipWeekends: true };
+  assert(!isOpen(friday, w, timezoneFor("SA"), weekendFor("SA")), "Friday is the weekend in Saudi Arabia");
+  assert(isOpen(friday, w, timezoneFor("AE"), weekendFor("AE")), "but a working day in Dubai");
+  const opens = nextOpen(friday, w, timezoneFor("SA"), weekendFor("SA"));
+  assert(new Date(opens).toISOString() === "2026-10-04T06:00:00.000Z", "Riyadh reopens Sunday 09:00 — got " + new Date(opens).toISOString());
+  assert(timezoneFor("US") === "America/New_York" && timezoneFor("ZZ", "Asia/Kolkata") === "Asia/Kolkata", "an unknown country falls back to the business's own clock");
+}
+
+{
+  // Local-time sending: only clients for whom it is office hours now.
+  await updateSettings({ window: { enabled: true, start: "09:00", end: "18:00", clientLocal: true, skipWeekends: false }, typing: { enabled: false }, restBreak: { enabled: false }, dailyLimit: 1000 });
+  const nowH = (tz) => Number(new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", hourCycle: "h23" }).format(new Date()));
+  // Pick two zones: one in office hours right now, one not.
+  const zones = { JP: "Asia/Tokyo", US: "America/New_York", GB: "Europe/London", AU: "Australia/Sydney", AE: "Asia/Dubai", BR: "America/Sao_Paulo", NZ: "Pacific/Auckland" };
+  const open = Object.entries(zones).find(([, tz]) => nowH(tz) >= 10 && nowH(tz) < 17)?.[0];
+  const closed = Object.entries(zones).find(([, tz]) => nowH(tz) < 7 || nowH(tz) >= 20)?.[0];
+  if (open && closed) {
+    const numbers = { JP: "+81 90 1234 0001", US: "+1 212 555 0101", GB: "+44 7911 000101", AU: "+61 412 000 101", AE: "+971 50 000 0101", BR: "+55 11 91234 0101", NZ: "+64 21 000 0101" };
+    const a = await C.createContact({ phone: numbers[closed], name: "Closed zone", country: closed, tags: ["TZ"] });
+    const b = await C.createContact({ phone: numbers[open], name: "Open zone", country: open, tags: ["TZ"] });
+    const c = await Camp.createCampaign({ message: "Local time", audience: { mode: "tags", tags: ["TZ"] }, action: "schedule" });
+    for (let i = 0; i < 6; i += 1) { R.runner.nextSendAt = 0; await R.runOnce(); }
+    const { items } = await R.getRecipients(c.id);
+    const st = Object.fromEntries(items.map((r) => [r.phone, r.status]));
+    assert(st[b.id] === "sent" && st[a.id] === "pending", `in local-time mode, ${open} (office hours) is sent and ${closed} (night) waits — ` + JSON.stringify(st));
+    assert(R.runner.waiting?.code === "local" && R.runner.waiting.until > Date.now(), "and the campaign says it is waiting for their office hours");
+    await R.cancelCampaign(c.id);
+    await C.deleteContacts([a.id, b.id]);
+  } else {
+    assert(true, "local-time test skipped: no suitable pair of zones at this hour");
+  }
+  await updateSettings({ window: { enabled: false, clientLocal: false } });
+}
+
+{
+  // A safety break after every N messages.
+  await updateSettings({ restBreak: { enabled: true, every: 2, minMinutes: 3, maxMinutes: 3 } });
+  assert(getSettings().restBreak.every === 5, "a break cannot be set more often than every 5 messages");
+  R.runner.sinceBreak = 0;
+  const c = await Camp.createCampaign({ message: "Breaks", audience: { mode: "all" }, action: "schedule" });
+  // Five sends (the first pass also starts the campaign)…
+  for (let i = 0; i < 5; i += 1) { R.runner.nextSendAt = 0; await R.runOnce(); }
+  // …and the next pass finds it on a break.
+  await R.runOnce();
+  assert(R.runner.waiting?.code === "break" && R.runner.nextSendAt - Date.now() > 170000, "after the set number of messages it takes a real break — " + JSON.stringify(R.runner.waiting));
+  await R.cancelCampaign(c.id);
+  await updateSettings({ restBreak: { enabled: false } });
+  R.runner.onBreak = false;
+  R.runner.nextSendAt = 0;
+}
+
+/* ══════ After sending: receipts, replies, follow-ups, ignored clients ═ */
+{
+  const { handleStatus, noteReply } = await import("../src/engine/tracking.js");
+  const c = await Camp.createCampaign({ message: "Tracked", audience: { mode: "tags", tags: ["UK"] }, action: "schedule" });
+  const done = await drain(c.id);
+  assert(done.stats.sent === 4, "tracked campaign sent");
+  const { items } = await R.getRecipients(c.id, { status: "sent" });
+  const entry = await (await import("../src/data/recipients.js")).loadRecipients(c.id, campaigns.get(c.id).chunkCount);
+  const lines = entry.chunks.flat();
+  await handleStatus({ id: lines[0].m, status: 3 });
+  await handleStatus({ id: lines[1].m, status: 4 });
+  const who = contacts.get(lines[2].p);
+  await noteReply(who, Date.now());
+  await noteReply(contacts.get(lines[3].p), Date.now(), { optedOut: true });
+  const s = campaigns.get(c.id).stats;
+  assert(s.delivered === 2 && s.read === 1 && s.replied === 1 && s.optedOut === 1, "delivered, read, replied and opted out are counted — " + JSON.stringify(s));
+  assert(items.length === 4, "recipients listed");
+
+  const fu = await R.followUp(c.id, "no-reply");
+  assert(fu.status === "draft" && fu.audience.contactIds.length === 2 && !fu.audience.contactIds.includes(who.id), "a follow-up goes to exactly those who did not reply or opt out");
+  const rp = await R.followUp(c.id, "replied");
+  assert(rp.audience.contactIds.length === 1 && rp.audience.contactIds[0] === who.id, "…or to those who replied");
+  assert(contacts.get(who.id).campaignsSinceReply === 0, "a reply resets the client's ignored-campaign count");
+
+  // Skip clients who ignored the last N campaigns.
+  // Every UK client has had several test campaigns by now; start them level.
+  for (const l of lines) await contacts.patch(l.p, { campaignsSinceReply: 0 });
+  const quiet = lines[0].p;
+  await contacts.patch(quiet, { campaignsSinceReply: 3 });
+  await updateSettings({ engagement: { skipIgnored: true, ignoredAfter: 3 } });
+  const aud = C.resolveAudience({ mode: "tags", tags: ["UK"] });
+  assert(aud.excluded.ignored === 1 && !aud.eligible.some((x) => x.id === quiet), "clients who ignored the last 3 campaigns are left out, and counted");
+  await updateSettings({ engagement: { skipIgnored: false } });
+
+  // Unanswered messages this month, for WhatsApp's monthly cap.
+  const { accountHealth } = await import("../src/engine/health.js");
+  const hl = accountHealth();
+  assert(hl.unanswered >= 1 && ["good", "watch", "risk"].includes(hl.verdict) && hl.totals.sent >= 4, "the health report counts unanswered messages and gives a verdict — " + JSON.stringify({ u: hl.unanswered, v: hl.verdict }));
+}
+
+{
+  // Checking numbers before a campaign.
+  const { startVerify, verifyStatus } = await import("../src/engine/verify.js");
+  const bad = await C.createContact({ phone: "+971 50 555 5000", name: "Dead number" });
+  const job = startVerify([bad.id, "447911123450"], { force: true });
+  assert(job.total === 2 && job.running, "a number check starts");
+  for (let i = 0; i < 100 && verifyStatus().running; i += 1) await new Promise((r) => setTimeout(r, 100));
+  assert(contacts.get(bad.id).waStatus === "invalid" && contacts.get("447911123450").waStatus === "valid", "numbers not on WhatsApp are marked before any campaign tries them");
+  const again = startVerify([bad.id]);
+  assert(again.total === 0 && again.skipped === 1, "a number checked recently is not checked again");
+}
+
 /* ══════ Counters under load ═══════════════════════════════════════════ */
 {
   const { bump, getDay, todayKey } = await import("../src/data/stats.js");

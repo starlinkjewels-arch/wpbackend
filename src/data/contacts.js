@@ -403,7 +403,9 @@ export function resolveAudience(audience = {}) {
   }
 
   const exclude = splitTags(audience.excludeTags ?? []);
-  const excluded = { optedOut: 0, invalid: 0, excludedTag: 0 };
+  const excluded = { optedOut: 0, invalid: 0, excludedTag: 0, ignored: 0 };
+  const eng = getSettings().engagement;
+  const ignoring = (c) => eng?.skipIgnored && (c.campaignsSinceReply ?? 0) >= eng.ignoredAfter;
   const eligible = [];
   const seen = new Set();
   for (const c of pool) {
@@ -412,6 +414,7 @@ export function resolveAudience(audience = {}) {
     if (exclude.some((t) => hasTag(c, t))) excluded.excludedTag += 1;
     else if (c.optedOut) excluded.optedOut += 1;
     else if (c.waStatus === "invalid") excluded.invalid += 1;
+    else if (ignoring(c)) excluded.ignored += 1;
     else eligible.push(c);
   }
   return { eligible, excluded };

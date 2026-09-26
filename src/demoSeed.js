@@ -65,15 +65,23 @@ export async function seedDemo() {
 
   // A finished campaign, with replies in the inbox.
   const done = PEOPLE.slice(0, 12);
-  await writeRecipients("cdemo1", done.map(([n, , p], i) => ({
-    p, n, s: i === 7 ? "failed" : "sent", t: now - 3 * 86400000 + i * 20000, ...(i === 7 ? { e: "Not on WhatsApp" } : null),
-  })));
+  // Receipts and replies, so the campaign page shows how clients responded.
+  const repliedPhones = new Set(["971501234567", "972521234567", "12125550147"]);
+  await writeRecipients("cdemo1", done.map(([n, , p], i) => {
+    const t = now - 3 * 86400000 + i * 20000;
+    if (i === 7) return { p, n, s: "failed", t, e: "Not on WhatsApp" };
+    return {
+      p, n, s: "sent", t, d: t + 4000,
+      ...(i % 4 !== 3 ? { r: t + 600000 } : null),
+      ...(repliedPhones.has(p) ? { rp: t + 3600000 } : null),
+    };
+  }));
   await campaigns.put("cdemo1", {
     name: "New Bridal Collection", status: "completed", materialized: true, chunkCount: 1,
     message: "{Hello|Hi|Dear} {{first_name|Sir/Madam}},\n\nOur *new bridal collection* is here — solitaire rings and eternity bands with GIA certified diamonds.\n\nReply *YES* for the catalogue and B2B prices.\n\n— {{business_name}}",
     mediaId: null, audience: { mode: "all", tags: [], tagMatch: "any", contactIds: [], excludeTags: [] },
     minDelay: 12, maxDelay: 30, scheduledAt: now - 3 * 86400000,
-    stats: { total: 12, pending: 0, sent: 11, failed: 1, skipped: 0 },
+    stats: { total: 12, pending: 0, sent: 11, failed: 1, skipped: 0, delivered: 11, read: 9, replied: 3, optedOut: 0 },
     createdAt: now - 4 * 86400000, updatedAt: now - 3 * 86400000, startedAt: now - 3 * 86400000, finishedAt: now - 3 * 86400000 + 300000,
   });
   const replies = [

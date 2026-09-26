@@ -23,6 +23,7 @@ export function localParts(ms, timeZone = "Asia/Kolkata") {
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      weekday: "short",
       hourCycle: "h23",
     }).formatToParts(new Date(ms));
   } catch {
@@ -32,6 +33,7 @@ export function localParts(ms, timeZone = "Asia/Kolkata") {
   return {
     date: `${get("year")}-${get("month")}-${get("day")}`,
     minutes: Number(get("hour")) * 60 + Number(get("minute")),
+    weekday: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(get("weekday")),
   };
 }
 
@@ -72,6 +74,46 @@ export function nextWindowOpen(ms, window, timeZone) {
   // Snap to the start of the minute so "opens at 09:00" is 09:00:00.
   const base = ms - (ms % 60000);
   return base + wait * 60000;
+}
+
+/**
+ * Inside sending hours AND not on the weekend (when weekends are skipped).
+ * `weekend` is the list of weekday numbers that are the weekend there.
+ */
+export function isOpen(ms, window, timeZone, weekend = [6, 0]) {
+  if (window?.skipWeekends && weekend.includes(localParts(ms, timeZone).weekday)) return false;
+  return inWindow(ms, window, timeZone);
+}
+
+/** The next moment isOpen() is true, at or after `ms`. Looks at most ten days ahead. */
+export function nextOpen(ms, window, timeZone, weekend = [6, 0]) {
+  let t = ms;
+  for (let i = 0; i < 10; i += 1) {
+    if (isOpen(t, window, timeZone, weekend)) return t;
+    const open = nextWindowOpen(t, window, timeZone);
+    if (open > t && isOpen(open, window, timeZone, weekend)) return open;
+    // Still the weekend there: jump to the start of their next day.
+    const { minutes } = localParts(open, timeZone);
+    t = open - (open % 60000) + (1440 - minutes) * 60000;
+  }
+  return t;
+}
+
+/**
+ * Today's cap. With warm-up on, day one allows `startLimit` and each day adds
+ * `step`, never above the normal daily limit.
+ * @returns {{limit: number, day: number|null, fullOnDay: number|null}}
+ */
+export function dailyCap(settings, now = Date.now()) {
+  const w = settings.warmup;
+  if (!w?.enabled || !w.startedAt) return { limit: settings.dailyLimit, day: null, fullOnDay: null };
+  const tz = settings.timezone;
+  const start = Date.parse(`${localParts(w.startedAt, tz).date}T00:00:00Z`);
+  const today = Date.parse(`${localParts(now, tz).date}T00:00:00Z`);
+  const day = Math.max(0, Math.round((today - start) / 86400000)) + 1;
+  const limit = Math.min(settings.dailyLimit, w.startLimit + (day - 1) * w.step);
+  const fullOnDay = Math.max(1, Math.ceil((settings.dailyLimit - w.startLimit) / w.step) + 1);
+  return { limit, day, fullOnDay };
 }
 
 /** Seconds, random in [min, max], with the pair repaired if entered backwards. */

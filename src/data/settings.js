@@ -14,7 +14,24 @@ export const DEFAULTS = {
   minDelay: 12,
   maxDelay: 30,
   dailyLimit: 300,
-  window: { enabled: true, start: "09:00", end: "21:00" },
+  /* Sending hours. clientLocal: judge them by each client's own clock (from
+     their country), so a Dubai buyer and a New York buyer both get it in
+     office hours. skipWeekends: no business messages on the weekend — which
+     is Friday–Saturday in the Gulf and Israel, Saturday–Sunday elsewhere. */
+  window: { enabled: true, start: "09:00", end: "21:00", clientLocal: false, skipWeekends: false },
+  /* A new number sends a little on day one and a little more each day, up to
+     dailyLimit. The most reliable protection against a ban on a fresh number. */
+  warmup: { enabled: false, startLimit: 30, step: 20, startedAt: null },
+  /* A few minutes' break after every so many messages — the "safety pause"
+     every serious bulk tool has. A person does not send 300 messages in one
+     unbroken stream. */
+  restBreak: { enabled: true, every: 25, minMinutes: 3, maxMinutes: 8 },
+  /* Show "typing…" for a moment before each campaign message. */
+  typing: { enabled: true },
+  /* WhatsApp now caps messages each month to people who never answer. Leaving
+     out clients who ignored the last few campaigns keeps the number clear of
+     it, and keeps reply rates — which WhatsApp watches — healthy. */
+  engagement: { skipIgnored: false, ignoredAfter: 3 },
   autoAddInbound: true,
   inboundTag: "Inquiry",
   optOut: {
@@ -83,6 +100,25 @@ export function sanitize(input = {}, base = DEFAULTS) {
       enabled: Boolean(s.window?.enabled ?? base.window.enabled),
       start: parseHm(s.window?.start) != null ? s.window.start : base.window.start,
       end: parseHm(s.window?.end) != null ? s.window.end : base.window.end,
+      clientLocal: Boolean(s.window?.clientLocal ?? base.window?.clientLocal ?? false),
+      skipWeekends: Boolean(s.window?.skipWeekends ?? base.window?.skipWeekends ?? false),
+    },
+    warmup: {
+      enabled: Boolean(s.warmup?.enabled ?? base.warmup?.enabled ?? false),
+      startLimit: clampInt(s.warmup?.startLimit, 5, 1000, base.warmup?.startLimit ?? DEFAULTS.warmup.startLimit),
+      step: clampInt(s.warmup?.step, 1, 500, base.warmup?.step ?? DEFAULTS.warmup.step),
+      startedAt: Number.isFinite(Number(s.warmup?.startedAt)) && s.warmup?.startedAt ? Number(s.warmup.startedAt) : null,
+    },
+    restBreak: {
+      enabled: Boolean(s.restBreak?.enabled ?? base.restBreak?.enabled ?? true),
+      every: clampInt(s.restBreak?.every, 5, 500, base.restBreak?.every ?? DEFAULTS.restBreak.every),
+      minMinutes: clampInt(s.restBreak?.minMinutes, 1, 120, base.restBreak?.minMinutes ?? DEFAULTS.restBreak.minMinutes),
+      maxMinutes: clampInt(s.restBreak?.maxMinutes, 1, 180, base.restBreak?.maxMinutes ?? DEFAULTS.restBreak.maxMinutes),
+    },
+    typing: { enabled: Boolean(s.typing?.enabled ?? base.typing?.enabled ?? true) },
+    engagement: {
+      skipIgnored: Boolean(s.engagement?.skipIgnored ?? base.engagement?.skipIgnored ?? false),
+      ignoredAfter: clampInt(s.engagement?.ignoredAfter, 1, 20, base.engagement?.ignoredAfter ?? DEFAULTS.engagement.ignoredAfter),
     },
     autoAddInbound: Boolean(s.autoAddInbound),
     inboundTag: String(s.inboundTag ?? "").trim().slice(0, 40),
@@ -104,6 +140,9 @@ export function sanitize(input = {}, base = DEFAULTS) {
     ai: sanitizeAi(s.ai, base.ai ?? DEFAULTS.ai),
   };
   if (out.maxDelay < out.minDelay) [out.minDelay, out.maxDelay] = [out.maxDelay, out.minDelay];
+  if (out.restBreak.maxMinutes < out.restBreak.minMinutes) {
+    [out.restBreak.minMinutes, out.restBreak.maxMinutes] = [out.restBreak.maxMinutes, out.restBreak.minMinutes];
+  }
   return out;
 }
 
@@ -155,6 +194,17 @@ export function getSettings() {
   return sanitize(saved);
 }
 
+/* Warm-up counts its days from the moment it is switched on; switching it off
+   forgets the start, and `restart` begins again from day one. */
+function mergeWarmup(current, patch) {
+  if (!patch) return current;
+  const { restart, ...rest } = patch;
+  const next = { ...current, ...rest, startedAt: current.startedAt };
+  if (!next.enabled) next.startedAt = null;
+  else if (!current.enabled || !current.startedAt || restart) next.startedAt = Date.now();
+  return next;
+}
+
 /* The page sends back what it was shown, which has no key in it — so an
    absent or empty key means "keep the saved one". Removing it is explicit. */
 function mergeAi(current, patch) {
@@ -172,6 +222,10 @@ export async function updateSettings(patch) {
     ...current,
     ...patch,
     window: { ...current.window, ...(patch.window ?? {}) },
+    warmup: mergeWarmup(current.warmup, patch.warmup),
+    restBreak: { ...current.restBreak, ...(patch.restBreak ?? {}) },
+    typing: { ...current.typing, ...(patch.typing ?? {}) },
+    engagement: { ...current.engagement, ...(patch.engagement ?? {}) },
     optOut: { ...current.optOut, ...(patch.optOut ?? {}) },
     autoReply: { ...current.autoReply, ...(patch.autoReply ?? {}) },
     ai: mergeAi(current.ai, patch.ai),

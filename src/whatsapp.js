@@ -231,6 +231,32 @@ export function onIncoming(fn) {
   return () => incomingListeners.delete(fn);
 }
 
+/* Delivered / read receipts for messages we sent, for campaign statistics. */
+const statusListeners = new Set();
+
+export function onStatus(fn) {
+  statusListeners.add(fn);
+  return () => statusListeners.delete(fn);
+}
+
+function emitStatus(entry) {
+  for (const fn of statusListeners) {
+    Promise.resolve()
+      .then(() => fn(entry))
+      .catch((err) => console.error("[whatsapp] status handler failed:", err.message));
+  }
+}
+
+/**
+ * Is this number on WhatsApp? For cleaning a client list before a campaign.
+ * @returns {Promise<boolean>}
+ */
+export async function checkNumber(phone) {
+  if (state.status !== "connected" || !state.sock) throw fail("WhatsApp not connected", "NOT_CONNECTED");
+  const [known] = (await state.sock.onWhatsApp(toJid(phone))) ?? [];
+  return Boolean(known?.exists);
+}
+
 function emitIncoming(entry) {
   for (const fn of incomingListeners) {
     Promise.resolve()
@@ -364,9 +390,12 @@ export async function start() {
   sock.ev.on("messages.update", (updates) => {
     if (!current()) return;
     for (const { key, update } of updates) {
+      if (typeof update.status !== "number") continue;
+      // 3 = delivered to their phone, 4 = read (only if they share read receipts).
+      if (key.fromMe && update.status >= 3) emitStatus({ id: key.id, status: update.status, jid: key.remoteJid });
       const waiter = ackWaiters.get(key.id);
       if (!waiter) continue;
-      if (typeof update.status === "number" && update.status >= 2) {
+      if (update.status >= 2) {
         ackWaiters.delete(key.id);
         waiter(update.status);
       }
@@ -461,7 +490,7 @@ function buildContent({ message, pdfBase64, fileName, media }) {
  * @param {{buffer: Buffer, mimetype: string, fileName?: string}} [args.media]
  * @returns {Promise<{deduped: boolean, acknowledged: boolean, messageId: string|null}>}
  */
-export async function sendMessage({ phone, jid: directJid, message, pdfBase64, fileName, media, clientMessageId }) {
+export async function sendMessage({ phone, jid: directJid, message, pdfBase64, fileName, media, clientMessageId, typingMs = 0 }) {
   if (!pdfBase64 && !message && !media) throw fail("Provide `message` and/or `pdfBase64`", "BAD_REQUEST");
   if (state.status !== "connected") {
     throw fail(
@@ -517,6 +546,20 @@ export async function sendMessage({ phone, jid: directJid, message, pdfBase64, f
         );
       }
       target = known.jid ?? jid;
+    }
+
+    /* "typing…" for a moment first, as a person would show. A chat-state
+       update to this one chat — it does not mark the account online, so the
+       owner's phone keeps getting notifications. Best effort: a failure here
+       must never stop the message itself. */
+    if (typingMs > 0) {
+      try {
+        await state.sock.sendPresenceUpdate("composing", target);
+        await sleep(Math.min(typingMs, 8000));
+        await state.sock.sendPresenceUpdate("paused", target);
+      } catch {
+        /* the message matters, the indicator does not */
+      }
     }
 
     const content = buildContent({ message, pdfBase64, fileName, media });

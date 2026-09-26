@@ -17,12 +17,14 @@
  * resend of a message that did go out is answered "already sent", not repeated.
  */
 import wa from "../wa.js";
-import { campaigns, contacts, dataState } from "../data/collections.js";
+import { campaigns, contacts, dataState, newId } from "../data/collections.js";
 import * as R from "../data/recipients.js";
 import { resolveAudience, fail } from "../data/contacts.js";
 import { getSettings } from "../data/settings.js";
 import { renderMessage, varsForContact } from "./personalize.js";
-import { inWindow, nextWindowOpen, randomGapMs, localParts } from "./rules.js";
+import { inWindow, isOpen, nextOpen, dailyCap, randomGapMs, localParts } from "./rules.js";
+import { timezoneFor, weekendFor } from "./timezones.js";
+import { rememberSend } from "./tracking.js";
 import { sentToday, bump } from "../data/stats.js";
 import { getMedia } from "../data/media.js";
 import { logMessage } from "../data/inbox.js";
@@ -61,6 +63,9 @@ export const runner = {
   /** { campaignId, code, reason, until? } — why nothing is being sent right now. */
   waiting: null,
   nextSendAt: 0,
+  /** Messages since the last safety break, and whether one is under way. */
+  sinceBreak: 0,
+  onBreak: false,
 };
 
 const TICK_MS = 1000;
@@ -134,22 +139,76 @@ async function step(now) {
   if (wa.state.status !== "connected") {
     return wait(active.id, "disconnected", wa.state.halted ? `WhatsApp stopped: ${wa.state.lastError}` : "Waiting for WhatsApp to connect");
   }
-  if (!inWindow(now, settings.window, settings.timezone)) {
-    return wait(active.id, "window", `Outside sending hours (${settings.window.start}–${settings.window.end})`, nextWindowOpen(now, settings.window, settings.timezone));
+  const local = settings.window.clientLocal;
+  // Own hours: checked here for everyone. Client hours: checked per client below.
+  if (!local && !isOpen(now, settings.window, settings.timezone)) {
+    const opens = nextOpen(now, settings.window, settings.timezone);
+    const weekend = settings.window.skipWeekends && inWindow(now, settings.window, settings.timezone);
+    return wait(active.id, "window", weekend ? "Weekend — sending resumes on the next working day" : `Outside sending hours (${settings.window.start}–${settings.window.end})`, opens);
   }
-  if (sentToday(now) >= settings.dailyLimit) {
+  const cap = dailyCap(settings, now);
+  if (sentToday(now) >= cap.limit) {
     const { minutes } = localParts(now, settings.timezone);
-    return wait(active.id, "limit", `Daily limit of ${settings.dailyLimit} messages reached`, now - (now % 60000) + (1440 - minutes) * 60000);
+    const reason = cap.day ? `Warm-up day ${cap.day}: today's limit of ${cap.limit} reached` : `Daily limit of ${cap.limit} messages reached`;
+    return wait(active.id, "limit", reason, now - (now % 60000) + (1440 - minutes) * 60000);
   }
   if (now < runner.nextSendAt) {
-    return wait(active.id, "gap", "Pausing between messages", runner.nextSendAt);
+    return runner.onBreak
+      ? wait(active.id, "break", "Short safety break", runner.nextSendAt)
+      : wait(active.id, "gap", "Pausing between messages", runner.nextSendAt);
   }
+  runner.onBreak = false;
 
   runner.waiting = null;
   const entry = await R.loadRecipients(active.id, active.chunkCount);
-  const next = R.nextPending(entry);
-  if (!next) return finish(active.id, entry);
+  if (!R.nextPending(entry)) return finish(active.id, entry);
+
+  let next;
+  if (local) {
+    /* The first client for whom it is office hours right now. Nobody? Then
+       wait for whichever of their zones opens first. */
+    const zone = zoneCache(settings);
+    next = R.nextPendingWhere(entry, (r) => {
+      const z = zone(r.p);
+      return isOpen(now, settings.window, z.tz, z.weekend);
+    });
+    if (!next) {
+      let soonest = Infinity;
+      const seen = new Set();
+      for (const r of R.allRecipients(entry)) {
+        if (r.s !== "pending") continue;
+        const z = zone(r.p);
+        const k = `${z.tz}|${z.weekend}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        soonest = Math.min(soonest, nextOpen(now, settings.window, z.tz, z.weekend));
+      }
+      return wait(active.id, "local", "Waiting for clients' office hours in their own time zones", Number.isFinite(soonest) ? soonest : undefined);
+    }
+  } else {
+    next = R.nextPending(entry);
+  }
   await sendOne(active, entry, next, settings);
+}
+
+/** A client's time zone and weekend, remembered for one pass of the loop. */
+function zoneCache(settings) {
+  const memo = new Map();
+  return (phone) => {
+    let z = memo.get(phone);
+    if (!z) {
+      const country = contacts.get(phone)?.country;
+      z = { tz: timezoneFor(country, settings.timezone), weekend: weekendFor(country) };
+      memo.set(phone, z);
+    }
+    return z;
+  };
+}
+
+/** How long "typing…" shows: roughly how long a person takes, 1.5–6 seconds. */
+function typingTime(text, settings) {
+  if (!settings.typing?.enabled) return 0;
+  return Math.min(6000, Math.max(1500, 1200 + String(text).length * 20 + Math.random() * 800));
 }
 
 /** A campaign's time has come: work out who it goes to, and freeze that list. */
@@ -200,7 +259,16 @@ async function sendOne(c, entry, handle, settings) {
 
   /* Checked again at send time, not only when the list was frozen: a client
      who replied STOP an hour into an eight-hour campaign must not get it. */
-  const skip = !contact ? "Client was deleted" : contact.optedOut ? "Opted out" : contact.waStatus === "invalid" ? "Not on WhatsApp" : null;
+  const eng = settings.engagement;
+  const skip = !contact
+    ? "Client was deleted"
+    : contact.optedOut
+      ? "Opted out"
+      : contact.waStatus === "invalid"
+        ? "Not on WhatsApp"
+        : eng?.skipIgnored && (contact.campaignsSinceReply ?? 0) >= eng.ignoredAfter
+          ? `Did not reply to the last ${eng.ignoredAfter} campaigns`
+          : null;
   if (skip) {
     R.updateRecipient(entry, handle, { s: "skipped", e: skip, t: now });
     return save(c.id, entry);
@@ -224,17 +292,36 @@ async function sendOne(c, entry, handle, settings) {
       message: text,
       media: media ? { buffer: media.buffer, mimetype: media.meta.mimetype, fileName: media.meta.name } : undefined,
       clientMessageId: `c_${c.id}_${contact.phone}`,
+      typingMs: typingTime(text, settings),
     });
     const warn = [note, res.acknowledged ? null : "Sent, not yet confirmed by WhatsApp"].filter(Boolean).join(" · ");
     R.updateRecipient(entry, handle, { s: "sent", t: Date.now(), m: res.messageId ?? null, ...(warn ? { e: warn } : null) });
     consecutiveErrors = 0;
     await bump("sent");
-    await contacts.patch(contact.id, { waStatus: "valid", lastCampaignAt: now, lastMessageAt: now });
+    await contacts.patch(contact.id, {
+      waStatus: "valid",
+      lastCampaignAt: now,
+      lastCampaignId: c.id,
+      lastMessageAt: now,
+      campaignsSinceReply: (contact.campaignsSinceReply ?? 0) + 1,
+      monthOut: monthOutAfterSend(contact, now, settings),
+    });
+    if (!res.deduped) await rememberSend({ messageId: res.messageId, campaignId: c.id, phone: contact.phone }).catch(() => {});
     await logMessage({
       phone: contact.phone, dir: "out", text, id: res.messageId ?? undefined, campaignId: c.id,
       name: contact.name, mediaType: mediaLabel(media?.meta),
     }).catch((e) => console.error("[runner] could not log to inbox:", e.message));
-    runner.nextSendAt = Date.now() + randomGapMs(c.minDelay, c.maxDelay);
+
+    // A safety break every so often; otherwise the normal random gap.
+    runner.sinceBreak += 1;
+    const rb = settings.restBreak;
+    if (rb?.enabled && runner.sinceBreak >= rb.every) {
+      runner.sinceBreak = 0;
+      runner.onBreak = true;
+      runner.nextSendAt = Date.now() + randomGapMs(rb.minMinutes * 60, rb.maxMinutes * 60);
+    } else {
+      runner.nextSendAt = Date.now() + randomGapMs(c.minDelay, c.maxDelay);
+    }
   } catch (err) {
     if (err.code === "NOT_CONNECTED") {
       // Nothing was sent. The client stays in the queue for when it reconnects.
@@ -262,6 +349,19 @@ async function sendOne(c, entry, handle, settings) {
     return;
   }
   await save(c.id, entry);
+}
+
+/**
+ * This month's messages to this client that have had no answer yet — what
+ * WhatsApp's monthly limit on unanswered messages counts. Reset when a new
+ * month starts, or when they write back after our first message this month.
+ */
+function monthOutAfterSend(contact, now, settings) {
+  const month = localParts(now, settings.timezone).date.slice(0, 7);
+  const prev = contact.monthOut;
+  const answered = prev && (contact.lastInboundAt ?? 0) >= prev.first;
+  if (!prev || prev.m !== month || answered) return { m: month, first: now, n: 1 };
+  return { ...prev, n: (prev.n ?? 0) + 1 };
 }
 
 async function pause(id, reason) {
@@ -334,11 +434,22 @@ export async function getRecipients(id, { status = "all", q = "", page = 1, page
   return paginate(R.allRecipients(entry), { status, q, page, pageSize });
 }
 
+/** Filters on the campaign page. The last three read the receipts and replies. */
+export const SEGMENTS = {
+  all: () => true,
+  pending: (r) => r.s === "pending",
+  sent: (r) => r.s === "sent",
+  failed: (r) => r.s === "failed",
+  skipped: (r) => r.s === "skipped",
+  replied: (r) => r.s === "sent" && Boolean(r.rp),
+  "no-reply": (r) => r.s === "sent" && !r.rp && !r.oo,
+  "read-no-reply": (r) => r.s === "sent" && Boolean(r.r) && !r.rp && !r.oo,
+};
+
 function paginate(items, { status, q, page, pageSize }) {
   const query = String(q).trim().toLowerCase();
-  const filtered = items.filter(
-    (r) => (status === "all" || r.s === status) && (!query || `${r.n} ${r.p}`.toLowerCase().includes(query)),
-  );
+  const match = SEGMENTS[status] ?? SEGMENTS.all;
+  const filtered = items.filter((r) => match(r) && (!query || `${r.n} ${r.p}`.toLowerCase().includes(query)));
   const size = Math.min(500, Math.max(1, Number(pageSize) || 100));
   const p = Math.max(1, Number(page) || 1);
   return {
@@ -347,9 +458,43 @@ function paginate(items, { status, q, page, pageSize }) {
     pageSize: size,
     items: filtered.slice((p - 1) * size, p * size).map((r) => {
       const ct = contacts.get(r.p);
-      return { phone: r.p, name: ct?.name || r.n || "", company: ct?.company || "", status: r.s, error: r.e ?? null, at: r.t ?? null };
+      return {
+        phone: r.p, name: ct?.name || r.n || "", company: ct?.company || "", status: r.s, error: r.e ?? null, at: r.t ?? null,
+        deliveredAt: r.d ?? null, readAt: r.r ?? null, repliedAt: r.rp ?? null, optedOutAt: r.oo ?? null,
+      };
     }),
   };
+}
+
+/**
+ * A new draft campaign to one segment of this one's clients — those who did
+ * not reply, those who did, or those who read it and said nothing.
+ */
+export async function followUp(id, segment) {
+  const c = need(id);
+  if (!c.materialized) throw fail("This campaign has not been sent yet", "BAD_STATE", 409);
+  const match = SEGMENTS[segment];
+  if (!match || !["replied", "no-reply", "read-no-reply"].includes(segment)) throw fail("Choose who to follow up with");
+  const entry = await R.loadRecipients(id, c.chunkCount);
+  const ids = R.allRecipients(entry).filter(match).map((r) => r.p).filter((p) => contacts.has(p));
+  if (!ids.length) throw fail("No clients in that group yet", "NOTHING", 409);
+  const label = { replied: "who replied", "no-reply": "no reply", "read-no-reply": "read, no reply" }[segment];
+  const now = Date.now();
+  return campaigns.put(newId("c"), {
+    name: `${c.name} · follow-up (${label})`.slice(0, 100),
+    message: "",
+    mediaId: null,
+    audience: { mode: "contacts", tags: [], tagMatch: "any", contactIds: ids, excludeTags: [] },
+    minDelay: c.minDelay,
+    maxDelay: c.maxDelay,
+    scheduledAt: null,
+    ai: { personalize: Boolean(c.ai?.personalize) },
+    followUpOf: { id: c.id, name: c.name, segment },
+    status: "draft",
+    stats: null,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 /** A rough finish time for a running campaign, for the progress card. */

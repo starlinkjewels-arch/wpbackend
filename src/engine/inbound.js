@@ -15,6 +15,7 @@ import { logMessage } from "../data/inbox.js";
 import { getSettings } from "../data/settings.js";
 import { bump } from "../data/stats.js";
 import { renderMessage, varsForContact } from "./personalize.js";
+import { noteReply } from "./tracking.js";
 
 const OPT_IN_WORDS = ["START", "SUBSCRIBE", "UNSTOP"];
 
@@ -63,7 +64,11 @@ export async function handleIncoming(m) {
   await bump("inbound");
 
   const word = keyword(m.text);
-  if (contact && settings.optOut.enabled && settings.optOut.keywords.includes(word)) {
+  const stopping = Boolean(contact && settings.optOut.enabled && settings.optOut.keywords.includes(word));
+  // Credit the reply (or the opt-out) to the campaign they last received.
+  await noteReply(contact, m.timestamp, { optedOut: stopping }).catch((err) => console.error("[inbound] reply not tracked:", err.message));
+
+  if (stopping) {
     if (!contact.optedOut) {
       await setOptedOut([contact.id], true);
       console.log("[inbound] a client opted out");

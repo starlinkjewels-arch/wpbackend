@@ -20,7 +20,10 @@ import { startJob, jobStatus, cancelJob, campaignContacts } from "../ai/jobs.js"
 import { loadDrafts, setDraft, removeDraft, messageHash } from "../data/aiDrafts.js";
 import { getDay, todayKey, lastDays, bump } from "../data/stats.js";
 import { saveMedia, getMedia, deleteMedia, MAX_MEDIA_BYTES } from "../data/media.js";
-import { runner, pauseCampaign, resumeCampaign, cancelCampaign, retryFailed, getRecipients, estimateFinish, sendTest } from "../engine/runner.js";
+import { runner, pauseCampaign, resumeCampaign, cancelCampaign, retryFailed, getRecipients, estimateFinish, sendTest, followUp } from "../engine/runner.js";
+import { accountHealth } from "../engine/health.js";
+import { startVerify, verifyStatus, cancelVerify } from "../engine/verify.js";
+import { dailyCap } from "../engine/rules.js";
 import { renderMessage, varsForContact, missingVarCounts, BUILT_IN_VARS } from "../engine/personalize.js";
 import { estimateDurationMs, SPEEDS } from "../engine/rules.js";
 import { formatPhone } from "../phone.js";
@@ -98,7 +101,9 @@ api.get("/status", (_req, res) => {
     unread: dataState.ready ? Inbox.unreadTotal() : 0,
     runner: { activeId: runner.activeId, waiting: runner.waiting },
     sentToday: dataState.ready ? getDay(todayKey()).sent : 0,
-    dailyLimit: settings?.dailyLimit ?? null,
+    // Today's real cap: lower than the setting while warm-up is on.
+    dailyLimit: settings ? dailyCap(settings).limit : null,
+    warmupDay: settings ? dailyCap(settings).day : null,
     businessName: settings?.businessName ?? "",
   });
 });
@@ -127,6 +132,7 @@ api.get("/dashboard", h(() => {
     recent: all.filter((c) => c.status === "completed").slice(0, 3).map(view),
     recentInquiries,
     unread: Inbox.unreadTotal(),
+    health: accountHealth(),
     onboarding: {
       connected: wa.state.status === "connected",
       hasContacts: contacts.size > 0,
@@ -151,6 +157,15 @@ api.get("/contacts", h((req) => ({
 })));
 
 api.get("/contacts/ids", h((req) => ({ ids: C.filterContacts(filtersFrom(req.query)).map((c) => c.id) })));
+
+/* Checking numbers on WhatsApp before a campaign. */
+api.get("/contacts/verify", h(() => ({ job: verifyStatus() })));
+api.post("/contacts/verify", express.json({ limit: "5mb" }), h((req) => {
+  const { ids: given, filter, force } = req.body ?? {};
+  const ids = Array.isArray(given) ? given.map(String) : C.filterContacts(filtersFrom(filter ?? {})).map((c) => c.id);
+  return { job: startVerify(ids, { force: Boolean(force) }) };
+}));
+api.post("/contacts/verify/cancel", h(() => { cancelVerify(); return { job: verifyStatus() }; }));
 api.get("/contacts/export", h((req) => ({ items: C.filterContacts(filtersFrom(req.query)) })));
 api.get("/contacts/meta", h(() => ({ tags: C.tagSummary(), fields: C.customFields(), builtIn: BUILT_IN_VARS, counts: C.contactCounts() })));
 
@@ -251,6 +266,7 @@ api.post("/campaigns/:id/resume", h(async (req) => view(await resumeCampaign(req
 api.post("/campaigns/:id/cancel", h(async (req) => view(await cancelCampaign(req.params.id))));
 api.post("/campaigns/:id/retry", h(async (req) => retryFailed(req.params.id)));
 api.post("/campaigns/:id/duplicate", h(async (req) => view(await Camp.duplicateCampaign(req.params.id))));
+api.post("/campaigns/:id/follow-up", express.json(), h(async (req) => view(await followUp(req.params.id, req.body?.segment))));
 api.post("/test-message", express.json(), h((req) => sendTest(req.body ?? {})));
 
 /* ── Attachments ─────────────────────────────────────────────────────── */

@@ -61,6 +61,23 @@ export function nextPending(entry) {
   return null;
 }
 
+/** The first pending recipient `accept` says may be sent to now (local-time sending). */
+export function nextPendingWhere(entry, accept) {
+  for (let n = 0; n < entry.chunks.length; n += 1) {
+    const i = entry.chunks[n].findIndex((r) => r.s === "pending" && accept(r));
+    if (i >= 0) return { n, i, r: entry.chunks[n][i] };
+  }
+  return null;
+}
+
+export function findRecipient(entry, phone) {
+  for (let n = 0; n < entry.chunks.length; n += 1) {
+    const i = entry.chunks[n].findIndex((r) => r.p === phone);
+    if (i >= 0) return { n, i, r: entry.chunks[n][i] };
+  }
+  return null;
+}
+
 export function updateRecipient(entry, { n, i }, patch) {
   entry.chunks[n][i] = { ...entry.chunks[n][i], ...patch };
   entry.dirty.add(n);
@@ -80,11 +97,19 @@ export async function flush(id) {
 }
 
 export function countStatuses(entry) {
-  const stats = { total: 0, pending: 0, sent: 0, failed: 0, skipped: 0 };
+  /* delivered / read / replied / optedOut come from WhatsApp receipts and
+     from replies after the send (engine/tracking.js):
+       d  delivered to their phone   r  read   rp  replied   oo  opted out */
+  const stats = { total: 0, pending: 0, sent: 0, failed: 0, skipped: 0, delivered: 0, read: 0, replied: 0, optedOut: 0 };
   for (const chunk of entry.chunks) {
     for (const r of chunk) {
       stats.total += 1;
       stats[r.s] = (stats[r.s] ?? 0) + 1;
+      if (r.s !== "sent") continue;
+      if (r.d || r.r) stats.delivered += 1;
+      if (r.r) stats.read += 1;
+      if (r.rp) stats.replied += 1;
+      if (r.oo) stats.optedOut += 1;
     }
   }
   return stats;
