@@ -17,6 +17,7 @@ import { campaigns, mediaIndex, newId } from "./collections.js";
 import { getSettings } from "./settings.js";
 import { fail, splitTags, resolveAudience } from "./contacts.js";
 import { deleteRecipients } from "./recipients.js";
+import { deleteDrafts } from "./aiDrafts.js";
 
 /** Can still be changed: nothing has been sent. */
 export const EDITABLE = new Set(["draft", "scheduled"]);
@@ -61,6 +62,8 @@ function clean(input, prev = {}) {
     minDelay,
     maxDelay,
     scheduledAt: merged.scheduledAt ? Number(merged.scheduledAt) : null,
+    // AI writes each client their own version of the message (engine/runner.js).
+    ai: { personalize: Boolean(merged.ai?.personalize) },
   };
 }
 
@@ -153,5 +156,6 @@ export async function deleteCampaign(id) {
   if (!c) return;
   if (c.status === "running") throw fail("Pause or cancel the campaign before deleting it", "RUNNING", 409);
   await deleteRecipients(id);
+  await deleteDrafts(id);
   await campaigns.remove(id);
 }

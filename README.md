@@ -14,12 +14,34 @@ What it does:
   now or at a scheduled time. Sending hours, a daily limit, STOP handling and
   restart-safety are in `src/engine/runner.js`.
 - **Inbox** — every reply, auto-reply, opt-out/opt-in.
+- **AI writer** (Sarvam AI, model `sarvam-105b` by default) — writes a campaign
+  message from a brief, polishes/shortens/translates one, writes **each
+  client their own version** of a campaign (reviewable and editable before
+  sending), and suggests inbox replies. Prompts and clean-up are in
+  `src/ai/writer.js`; the admin manages model, tone, language, business facts
+  and the key in Settings → AI writer.
+
+### How AI-personalised campaigns send
+
+For each client the runner uses, in order: the message the admin **edited**
+(sent exactly as written) → the AI draft written for the **current** campaign
+text → a fresh AI version written just before sending → and if the AI cannot
+answer, the plain campaign message (marked on that client's line). A campaign
+never stops because the AI is down. Drafts written before the campaign text
+changed are "outdated" and are rewritten, never sent.
+
+The AI is told to use only facts from Settings → *About your business* and the
+brief, never to invent prices or offers, never to mention budgets, labels or
+private notes, and never to leave `[Name]`-style placeholders; its output is
+cleaned again in code (markdown → WhatsApp formatting, placeholders →
+variables with fallbacks).
 
 ## Run it on your computer
 
 ```
 npm install
 npm run demo      # pretend WhatsApp + sample clients, nothing is sent. Password: demo
+                  # (uses the real AI if SARVAM_API_KEY is in .env, canned text otherwise)
 npm start         # the real thing, using .env
 npm test          # every rule, no WhatsApp or Firebase needed
 ```
@@ -46,6 +68,7 @@ one session stop messages being delivered).
 | `FIRESTORE_DATABASE_ID` | no | The named database. Default `wpserver`. |
 | `WA_SESSION_ID` | no | Which saved WhatsApp session. Default `default`. |
 | `DEMO_MODE` | no | `1` for the pretend WhatsApp and sample data. |
+| `SARVAM_API_KEY` | for AI | Sarvam AI key. Optional: the admin can instead paste a key in Settings → AI writer (saved server-side, never sent to the browser); that one wins. |
 | `PORT` | no | Default 3000; hosts set this. |
 
 * The real WhatsApp mode always needs Firebase, for the session. Demo mode and
@@ -100,7 +123,8 @@ instead). Errors are `{ error, code }` with the message written for a person.
 | Campaigns | `GET/POST /api/campaigns`, `GET/PUT/DELETE /api/campaigns/:id`, `GET /api/campaigns/:id/recipients`, `POST /api/campaigns/:id/{pause,resume,cancel,retry,duplicate}`, `POST /api/audience/preview`, `POST /api/render`, `POST /api/test-message` |
 | Attachments | `POST /api/media` (raw file body, `X-File-Name`), `GET /api/media/:id?sig=…` (signed link) |
 | Inbox | `GET /api/conversations`, `GET /api/conversations/:key`, `POST /api/conversations/:key/send` |
-| Templates / settings | `/api/templates`, `GET/PUT /api/settings` |
+| Templates / settings | `/api/templates`, `GET/PUT /api/settings` (the AI key is write-only) |
+| AI | `GET /api/ai/status`, `POST /api/ai/{compose,rewrite,test,personalize-preview}`, `GET /api/campaigns/:id/ai`, `POST /api/campaigns/:id/ai/{generate,cancel}`, `PUT/DELETE /api/campaigns/:id/ai/:phone`, `POST /api/campaigns/:id/ai/:phone/regenerate`, `POST /api/conversations/:key/suggest` |
 
 ## The WhatsApp bridge
 

@@ -294,6 +294,95 @@ async function drain(id, max = 50) {
   rmSync(dir, { recursive: true, force: true });
 }
 
+/* ══════ The AI writer ═════════════════════════════════════════════════ */
+{
+  const { setTransport } = await import("../src/ai/sarvam.js");
+  const W = await import("../src/ai/writer.js");
+  const { publicSettings } = await import("../src/data/settings.js");
+  const { getDraft, setDraft, messageHash } = await import("../src/data/aiDrafts.js");
+  const { startJob, jobStatus } = await import("../src/ai/jobs.js");
+
+  // The key is kept, never shown, and only replaced or removed on purpose.
+  await updateSettings({ ai: { apiKey: "sk_secret_123456" } });
+  const pub = publicSettings();
+  assert(!("apiKey" in pub.ai) && pub.ai.hasKey && pub.ai.keyHint === "sk_se…3456", "the API key never reaches the browser — only a hint of it");
+  await updateSettings({ ai: { apiKey: "", model: "sarvam-105b-conversations" } });
+  assert(getSettings().ai.apiKey === "sk_secret_123456" && getSettings().ai.model === "sarvam-105b-conversations", "saving other AI settings keeps the saved key");
+  await updateSettings({ ai: { clearKey: true, model: "bad model name!" } });
+  assert(getSettings().ai.apiKey === "" && getSettings().ai.model === "sarvam-105b-conversations", "the key is removed only when asked; a nonsense model name keeps the last good one");
+  await updateSettings({ ai: { model: "sarvam-105b" } });
+
+  // What comes back from a model is cleaned before anyone sees it.
+  assert(W.cleanOutput('Here is your message:\n\n"**New** collection"') === "*New* collection", "markdown and 'Here is' wrapping are removed");
+  const fixed = W.fixTemplateVars("Dear [Client Name],\nFor {{company}} and {name}");
+  assert(fixed === "Dear {{first_name|Sir/Madam}},\nFor {{company|your business}} and {{name|Sir/Madam}}", "placeholders become variables with safe fallbacks — got " + JSON.stringify(fixed));
+  assert(W.fixTemplateVars("{{first_name|Sir/Madam}}\nHello") === "Dear {{first_name|Sir/Madam}},\nHello", "a greeting that is only a name gets its 'Dear'");
+
+  let calls = 0;
+  let fail = null;
+  setTransport(async (body) => {
+    calls += 1;
+    if (fail) {
+      const e = new Error(fail.message);
+      e.code = fail.code;
+      throw e;
+    }
+    const who = /greet them as (\w+)/.exec(body.messages.at(-1).content)?.[1] ?? "friend";
+    return { text: `Here is the message:\n\nDear ${who}, a note written just for you.`, usage: { total_tokens: 10 } };
+  });
+
+  const p = await W.personalize({ message: "Hi {{first_name}}", contact: { name: "Mr. Ben Carter" } });
+  assert(p.text === "Dear Ben, a note written just for you.", "a personal version is written and cleaned — got " + JSON.stringify(p.text));
+
+  // A campaign where AI writes each message.
+  const c = await Camp.createCampaign({ message: "New collection for {{company|you}}", audience: { mode: "tags", tags: ["UK"] }, ai: { personalize: true } });
+  assert(campaigns.get(c.id).ai.personalize === true, "a campaign remembers it is AI-personalised");
+  await setDraft(c.id, "447911123450", { text: "Hand-written for Buyer 0", edited: true, hash: "old" });
+  await setDraft(c.id, "447911123451", { text: "Stale draft", hash: "old" });
+  calls = 0;
+  const job = await startJob(c.id);
+  for (let i = 0; i < 50 && jobStatus(c.id)?.running; i += 1) await new Promise((r) => setTimeout(r, 20));
+  assert(job.total === 3 && jobStatus(c.id).done === 3 && calls === 3, "'write all' skips the admin's edits and rewrites missing and outdated ones — " + JSON.stringify(jobStatus(c.id)));
+  assert((await getDraft(c.id, "447911123450")).text === "Hand-written for Buyer 0", "an edited message is never overwritten");
+  assert((await getDraft(c.id, "447911123451")).hash === messageHash("New collection for {{company|you}}"), "the outdated one is rewritten");
+
+  // Sending: edited drafts go as written; one missing draft is written on the spot;
+  // and when the AI is down the client still gets the plain message.
+  const { removeDraft } = await import("../src/data/aiDrafts.js");
+  await removeDraft(c.id, "447911123452");
+  await Camp.updateCampaign(c.id, { action: "schedule" });
+  fail = null;
+  let done = await drain(c.id);
+  assert(done.stats.sent === 4, "an AI campaign sends to everyone — " + JSON.stringify(done.stats));
+  const { conversations: convs } = await import("../src/data/collections.js");
+  assert(convs.get("447911123450").lastText.includes("Hand-written for Buyer 0"), "the admin's edited message is exactly what was sent");
+  assert((await getDraft(c.id, "447911123452"))?.text.includes("written just for you"), "a client without a draft gets one written at send time");
+
+  const c2 = await Camp.createCampaign({ message: "Plain fallback {{first_name|there}}", audience: { mode: "tags", tags: ["UK"] }, ai: { personalize: true }, action: "schedule" });
+  fail = { message: "down", code: "AI_UNREACHABLE" };
+  done = await drain(c2.id);
+  assert(done.stats.sent === 4, "an AI outage never stops a campaign");
+  const { items } = await R.getRecipients(c2.id, { status: "sent" });
+  assert(items.every((r) => /AI unavailable/.test(r.error ?? "")), "and each such message is marked as the standard text");
+  assert(convs.get("447911123450").lastText.startsWith("Plain fallback"), "the standard message is what those clients got");
+
+  fail = { message: "bad key", code: "AI_BAD_KEY" };
+  const c3 = await Camp.createCampaign({ message: "x", audience: { mode: "tags", tags: ["UK"] }, ai: { personalize: true } });
+  await startJob(c3.id);
+  for (let i = 0; i < 50 && jobStatus(c3.id)?.running; i += 1) await new Promise((r) => setTimeout(r, 20));
+  assert(jobStatus(c3.id).failed <= 3 && jobStatus(c3.id).lastError === "bad key", "a refused key stops 'write all' at once instead of failing every client");
+  setTransport(null);
+}
+
+/* ══════ Counters under load ═══════════════════════════════════════════ */
+{
+  const { bump, getDay, todayKey } = await import("../src/data/stats.js");
+  const before = getDay(todayKey());
+  await Promise.all([...Array(20)].map((_, i) => bump(i % 2 ? "aiRequests" : "aiTokens", 1)));
+  const after = getDay(todayKey());
+  assert(after.aiRequests - before.aiRequests === 10 && after.aiTokens - before.aiTokens === 10, "twenty counters bumped at once lose nothing — " + JSON.stringify({ before, after }));
+}
+
 /* ══════ Never twice, without Firebase ═════════════════════════════════ */
 {
   const { claimsDb } = await import("../src/store/claimsDb.js");

@@ -14,7 +14,10 @@ import * as C from "../data/contacts.js";
 import * as Camp from "../data/campaigns.js";
 import * as T from "../data/templates.js";
 import * as Inbox from "../data/inbox.js";
-import { getSettings, updateSettings } from "../data/settings.js";
+import { getSettings, updateSettings, publicSettings, AI_MODELS, AI_TONES } from "../data/settings.js";
+import * as Writer from "../ai/writer.js";
+import { startJob, jobStatus, cancelJob, campaignContacts } from "../ai/jobs.js";
+import { loadDrafts, setDraft, removeDraft, messageHash } from "../data/aiDrafts.js";
 import { getDay, todayKey, lastDays, bump } from "../data/stats.js";
 import { saveMedia, getMedia, deleteMedia, MAX_MEDIA_BYTES } from "../data/media.js";
 import { runner, pauseCampaign, resumeCampaign, cancelCampaign, retryFailed, getRecipients, estimateFinish, sendTest } from "../engine/runner.js";
@@ -322,8 +325,106 @@ api.post("/conversations/:key/send", express.json(), h(async (req) => {
 
 /* ── Settings ────────────────────────────────────────────────────────── */
 
-api.get("/settings", h(() => getSettings()));
-api.put("/settings", express.json(), h((req) => updateSettings(req.body ?? {})));
+// The Sarvam key is never sent back — see publicSettings().
+api.get("/settings", h(() => publicSettings()));
+api.put("/settings", express.json(), h(async (req) => publicSettings(await updateSettings(req.body ?? {}))));
+
+/* ── AI writer ───────────────────────────────────────────────────────── */
+
+api.get("/ai/status", h(() => {
+  const s = publicSettings();
+  const today = getDay(todayKey());
+  return {
+    enabled: s.ai.enabled,
+    ready: s.ai.enabled && (s.ai.hasKey || DEMO_MODE),
+    model: s.ai.model,
+    models: AI_MODELS,
+    tones: AI_TONES,
+    language: s.ai.language,
+    tone: s.ai.tone,
+    demo: DEMO_MODE && !s.ai.hasKey,
+    usageToday: { requests: today.aiRequests, tokens: today.aiTokens },
+  };
+}));
+
+api.post("/ai/test", h(() => Writer.testAi()));
+
+api.post("/ai/compose", express.json(), h((req) => {
+  const { brief, tone, language, length } = req.body ?? {};
+  return Writer.compose({ brief, tone, language, length });
+}));
+
+api.post("/ai/rewrite", express.json(), h((req) => Writer.rewrite(req.body ?? {})));
+
+/** One client's AI version of a message, for the editor's preview. Nothing is saved. */
+api.post("/ai/personalize-preview", express.json(), h(async (req) => {
+  const { message, contactId } = req.body ?? {};
+  const contact = (contactId && contacts.get(contactId)) || contacts.all()[0];
+  if (!contact) throw C.fail("Add a client first — the AI needs someone to write for");
+  const { text } = await Writer.personalize({ message, contact });
+  return { text, contact: { id: contact.id, name: contact.name } };
+}));
+
+/* Each client's AI message for a campaign: list, write all, edit, rewrite one. */
+
+function needCampaign(id) {
+  const c = campaigns.get(id);
+  if (!c) throw C.fail("Campaign not found", "NOT_FOUND", 404);
+  return c;
+}
+
+api.get("/campaigns/:id/ai", h(async (req) => {
+  const c = needCampaign(req.params.id);
+  const hash = messageHash(c.message);
+  const drafts = await loadDrafts(c.id);
+  const people = await campaignContacts(c);
+  const rows = people.map((p) => {
+    const id = p.id ?? p.phone;
+    const d = drafts.get(id);
+    const state = !d?.text ? "missing" : d.edited ? "edited" : d.hash === hash ? "ready" : "outdated";
+    return { phone: id, name: p.name ?? "", company: p.company ?? "", country: p.country ?? "", text: d?.text ?? "", state, at: d?.at ?? null };
+  });
+  const counts = { total: rows.length, ready: 0, edited: 0, outdated: 0, missing: 0 };
+  for (const r of rows) counts[r.state] += 1;
+  const q = String(req.query.q ?? "").trim().toLowerCase();
+  const filter = String(req.query.filter ?? "all");
+  const shown = rows.filter((r) => (filter === "all" || r.state === filter) && (!q || `${r.name} ${r.company} ${r.phone} ${r.text}`.toLowerCase().includes(q)));
+  const size = 30;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  return { counts, job: jobStatus(c.id), total: shown.length, page, pageSize: size, items: shown.slice((page - 1) * size, page * size) };
+}));
+
+api.post("/campaigns/:id/ai/generate", express.json(), h((req) => startJob(req.params.id, { mode: req.body?.mode === "all" ? "all" : "missing" })));
+api.post("/campaigns/:id/ai/cancel", h((req) => { cancelJob(req.params.id); return jobStatus(req.params.id); }));
+
+api.put("/campaigns/:id/ai/:phone", express.json(), h(async (req) => {
+  const c = needCampaign(req.params.id);
+  const text = String(req.body?.text ?? "").trim();
+  if (!text) throw C.fail("The message cannot be empty");
+  return setDraft(c.id, req.params.phone, { text, edited: true, hash: messageHash(c.message) });
+}));
+
+api.post("/campaigns/:id/ai/:phone/regenerate", h(async (req) => {
+  const c = needCampaign(req.params.id);
+  const contact = contacts.get(req.params.phone);
+  if (!contact) throw C.fail("Client not found", "NOT_FOUND", 404);
+  const { text } = await Writer.personalize({ message: c.message, contact });
+  return setDraft(c.id, contact.id, { text, hash: messageHash(c.message) });
+}));
+
+api.delete("/campaigns/:id/ai/:phone", h(async (req) => {
+  needCampaign(req.params.id);
+  await removeDraft(req.params.id, req.params.phone);
+}));
+
+/* ── Inbox: a suggested reply ────────────────────────────────────────── */
+
+api.post("/conversations/:key/suggest", h(async (req) => {
+  const key = req.params.key;
+  const messages = await Inbox.getMessages(key, 30);
+  const contact = contacts.get(key) ?? { name: conversations.get(key)?.name ?? "" };
+  return Writer.suggestReply({ messages, contact });
+}));
 
 /* ── Demo helpers ────────────────────────────────────────────────────── */
 

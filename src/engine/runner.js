@@ -26,6 +26,34 @@ import { inWindow, nextWindowOpen, randomGapMs, localParts } from "./rules.js";
 import { sentToday, bump } from "../data/stats.js";
 import { getMedia } from "../data/media.js";
 import { logMessage } from "../data/inbox.js";
+import { getDraft, setDraft, messageHash, draftUsable } from "../data/aiDrafts.js";
+import { personalize } from "../ai/writer.js";
+
+/**
+ * The text this client gets.
+ *
+ * Plain campaigns: the message with their details filled in. AI-personalised
+ * campaigns: the draft the admin reviewed (or edited) — or, when there is none
+ * or the campaign text has changed since, one written now. If the AI cannot
+ * answer, the client gets the plain message rather than nothing: a campaign
+ * must never stall on a third-party service.
+ */
+async function messageFor(c, contact, settings) {
+  const vars = varsForContact(contact, { business_name: settings.businessName });
+  const plain = renderMessage(c.message, vars);
+  if (!c.ai?.personalize) return { text: plain };
+  const hash = messageHash(c.message);
+  const draft = await getDraft(c.id, contact.id).catch(() => null);
+  if (draftUsable(draft, hash)) return { text: renderMessage(draft.text, vars) };
+  try {
+    const { text } = await personalize({ message: c.message, contact });
+    await setDraft(c.id, contact.id, { text, hash }).catch(() => {});
+    return { text };
+  } catch (err) {
+    console.warn(`[runner] AI could not write this message (${err.message}) — sending the standard text`);
+    return { text: plain, note: "AI unavailable — the standard message was sent" };
+  }
+}
 
 /** What the runner is doing, for the dashboard. Never persisted. */
 export const runner = {
@@ -189,7 +217,7 @@ async function sendOne(c, entry, handle, settings) {
     if (!media) return pause(c.id, "The attached file could not be loaded — it may have been deleted");
   }
 
-  const text = renderMessage(c.message, varsForContact(contact, { business_name: settings.businessName }));
+  const { text, note } = await messageFor(c, contact, settings);
   try {
     const res = await wa.sendMessage({
       phone: contact.phone,
@@ -197,7 +225,8 @@ async function sendOne(c, entry, handle, settings) {
       media: media ? { buffer: media.buffer, mimetype: media.meta.mimetype, fileName: media.meta.name } : undefined,
       clientMessageId: `c_${c.id}_${contact.phone}`,
     });
-    R.updateRecipient(entry, handle, { s: "sent", t: Date.now(), m: res.messageId ?? null, ...(res.acknowledged ? null : { e: "Sent, not yet confirmed by WhatsApp" }) });
+    const warn = [note, res.acknowledged ? null : "Sent, not yet confirmed by WhatsApp"].filter(Boolean).join(" · ");
+    R.updateRecipient(entry, handle, { s: "sent", t: Date.now(), m: res.messageId ?? null, ...(warn ? { e: warn } : null) });
     consecutiveErrors = 0;
     await bump("sent");
     await contacts.patch(contact.id, { waStatus: "valid", lastCampaignAt: now, lastMessageAt: now });
@@ -336,12 +365,15 @@ export function estimateFinish(c) {
  * Send one message to the business's own number (or any number), exactly as
  * a client would receive it. Nothing is recorded against the campaign.
  */
-export async function sendTest({ message, mediaId, contactId, to }) {
+export async function sendTest({ message, mediaId, contactId, to, personalizeAi = false, text: given }) {
   const settings = getSettings();
   const target = String(to || wa.state.phone || "").replace(/\D/g, "");
   if (!target) throw fail("Connect WhatsApp first — the test is sent to your own number", "NOT_CONNECTED", 409);
   const sample = (contactId && contacts.get(contactId)) || contacts.all()[0] || { name: "Rahul Mehta", company: "Mehta Gems" };
-  const text = renderMessage(message, varsForContact(sample, { business_name: settings.businessName }));
+  // `text` is what the page already showed in its preview (an AI version):
+  // the test must be that exact message, not a fresh roll of the dice.
+  let text = given?.trim() ? String(given).slice(0, 4000) : renderMessage(message, varsForContact(sample, { business_name: settings.businessName }));
+  if (!given?.trim() && personalizeAi) text = (await personalize({ message, contact: sample })).text;
   let media;
   if (mediaId) {
     const m = await getMedia(mediaId);
