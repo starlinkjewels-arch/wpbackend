@@ -38,6 +38,27 @@ groups where only admins may post (and we are not admin) skipped at send time.
   WhatsApp Status for all clients or tags (opted-out never). WhatsApp shows it
   only to people who have the number saved; it lasts 24 hours.
 
+### Batches, leads and lead links
+
+- **Batches** (`src/data/batches.js`, `waBatches`): named client lists with a
+  colour; a broadcast can go to one or more batches, and each batch keeps the
+  history of every broadcast sent to it with its results.
+- **Lead Radar** (`src/engine/leads.js`): every incoming message is sorted hot
+  (price, stock, catalogue, meeting, order, "yes") / warm / cold / no action
+  by wording, instantly; with a Sarvam key the AI then reads the conversation
+  and writes a one-line note of what the buyer wants. A client is "waiting"
+  until a person answers — an auto-reply or a campaign message does not count
+  (`isWaiting` in `src/data/inbox.js`). Settings → Lead Radar sets the alert time.
+- **Lead links & QR codes** (`src/data/leadLinks.js`, `waLeadLinks`): a wa.me
+  link to the business number with a message typed in, ending "(Ref: CODE)".
+  A message carrying the code tags the sender, adds them to the link's batch,
+  sends the link's own welcome (instead of the general auto-reply) and is
+  counted once per person. QR as PNG/SVG from `GET /api/lead-links/:id/qr`.
+- **Savings** (`src/engine/savings.js`): what the same campaign messages would
+  have cost on WhatsApp's official Business API, at Meta's marketing rate for
+  each recipient's country (rate card of 1 Oct 2026, before provider fees).
+  Group posts are not counted — the API cannot post to groups at all.
+
 ### Sending safety (Settings → Sending safety)
 
 WhatsApp publishes no daily limit for a normal number; it watches behaviour.

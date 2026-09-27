@@ -6,7 +6,10 @@
  *   2. It is written into that client's conversation in the inbox.
  *   3. "STOP" (or any opt-out word the business set) takes them off every
  *      future campaign — including the one sending right now. "START" undoes it.
- *   4. Optionally, an automatic first reply, at most once per cooldown.
+ *   4. A message sent from a lead link / QR code ("… (Ref: HKFAIR)") tags the
+ *      client, puts them in the link's batch and gets the link's own welcome.
+ *   5. Lead Radar sorts it — hot, warm, cold — so buyers are answered first.
+ *   6. Optionally, an automatic first reply, at most once per cooldown.
  */
 import wa from "../wa.js";
 import { conversations, contacts, dataState } from "../data/collections.js";
@@ -16,6 +19,8 @@ import { getSettings } from "../data/settings.js";
 import { bump } from "../data/stats.js";
 import { renderMessage, varsForContact } from "./personalize.js";
 import { noteReply } from "./tracking.js";
+import { scoreInbound } from "./leads.js";
+import { matchLink, recordLead } from "../data/leadLinks.js";
 
 const OPT_IN_WORDS = ["START", "SUBSCRIBE", "UNSTOP"];
 
@@ -33,7 +38,7 @@ async function reply(key, jid, phone, text) {
   if (!text?.trim() || wa.state.status !== "connected") return;
   await sleep(timing.replyDelayMs());
   const res = await wa.sendMessage({ phone, jid, message: text });
-  await logMessage({ phone: key, jid, dir: "out", text, id: res.messageId ?? undefined, at: Date.now() });
+  await logMessage({ phone: key, jid, dir: "out", text, id: res.messageId ?? undefined, at: Date.now(), auto: true });
   await bump("sent");
 }
 
@@ -79,6 +84,31 @@ export async function handleIncoming(m) {
   if (contact?.optedOut && OPT_IN_WORDS.includes(word)) {
     await setOptedOut([contact.id], false);
     await reply(key, m.jid, m.phone, "You are subscribed again. Thank you!");
+    return;
+  }
+
+  // Sent from a lead link or QR code?
+  const link = m.text ? matchLink(m.text) : null;
+  let welcome = null;
+  if (link && contact) {
+    const { first } = await recordLead(link, contact, m.timestamp).catch((err) => {
+      console.error("[inbound] lead link not recorded:", err.message);
+      return { first: false };
+    });
+    contact = contacts.get(contact.id) ?? contact;
+    const lastReply = conversations.get(key)?.lastAutoReplyAt ?? 0;
+    if (link.welcome?.trim() && (first || Date.now() - lastReply > 24 * 3600000)) {
+      await conversations.patch(key, { lastAutoReplyAt: Date.now() });
+      welcome = renderMessage(link.welcome, varsForContact(contact, { business_name: settings.businessName }));
+    }
+  }
+
+  await scoreInbound({ key, contact, text: m.text, at: m.timestamp, fromLink: link?.name ?? null })
+    .catch((err) => console.error("[inbound] lead not sorted:", err.message));
+
+  // A link's own welcome replaces the general auto-reply.
+  if (link) {
+    if (welcome) await reply(key, m.jid, m.phone, welcome);
     return;
   }
 

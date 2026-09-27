@@ -46,6 +46,11 @@ export const DEFAULTS = {
     text: "Thank you for contacting {{business_name}}. Our team will get back to you shortly.",
   },
   onboardingDismissed: false,
+  /* Lead Radar: every incoming message sorted hot / warm / cold, and a warning
+     when a hot buyer has waited longer than alertHours for an answer. */
+  leadRadar: { enabled: true, useAi: true, alertHours: 2 },
+  // The connected number, remembered so lead links keep working while offline.
+  businessPhone: "",
   ai: {
     enabled: true,
     model: "sarvam-105b",
@@ -137,6 +142,12 @@ export function sanitize(input = {}, base = DEFAULTS) {
       text: String(s.autoReply?.text ?? "").slice(0, 2000),
     },
     onboardingDismissed: Boolean(s.onboardingDismissed),
+    leadRadar: {
+      enabled: Boolean(s.leadRadar?.enabled ?? base.leadRadar?.enabled ?? true),
+      useAi: Boolean(s.leadRadar?.useAi ?? base.leadRadar?.useAi ?? true),
+      alertHours: clampInt(s.leadRadar?.alertHours, 1, 72, base.leadRadar?.alertHours ?? DEFAULTS.leadRadar.alertHours),
+    },
+    businessPhone: String(s.businessPhone ?? base.businessPhone ?? "").replace(/\D/g, "").slice(0, 16),
     ai: sanitizeAi(s.ai, base.ai ?? DEFAULTS.ai),
   };
   if (out.maxDelay < out.minDelay) [out.minDelay, out.maxDelay] = [out.maxDelay, out.minDelay];
@@ -228,6 +239,7 @@ export async function updateSettings(patch) {
     engagement: { ...current.engagement, ...(patch.engagement ?? {}) },
     optOut: { ...current.optOut, ...(patch.optOut ?? {}) },
     autoReply: { ...current.autoReply, ...(patch.autoReply ?? {}) },
+    leadRadar: { ...current.leadRadar, ...(patch.leadRadar ?? {}) },
     ai: mergeAi(current.ai, patch.ai),
   };
   const next = sanitize(merged, current);

@@ -572,6 +572,85 @@ async function drain(id, max = 50) {
   assert(campaigns.has(c.id), "deleting a batch keeps its broadcasts");
 }
 
+/* ══════ Lead Radar: the buyer asking for a price comes first ══════════ */
+{
+  const { quickRead, leadBoard, setLead } = await import("../src/engine/leads.js");
+  const { conversations } = await import("../src/data/collections.js");
+  const lv = (t) => quickRead(t).level;
+  assert(lv("What is your best price for 20 pcs 1ct GIA ovals?") === "hot" && quickRead("What is your best price?").intent === "price", "a price question is a hot lead");
+  assert(lv("Yes please send") === "hot" && lv("Please share the catalogue") === "hot" && lv("Do you have 2ct in stock?") === "hot", "yes, catalogue and stock questions are hot");
+  assert(lv("We want to confirm the order") === "hot" && quickRead("We want to confirm the order").intent === "order", "an order is hot, as an order");
+  assert(lv("Not interested, thanks") === "cold" && lv("maybe later") === "cold", "not interested is cold");
+  assert(lv("ok thanks 👍") === "none" && lv("🙏") === "none" && lv("Thanks a lot") !== "hot", "thanks and emoji are nothing to act on");
+  assert(lv("Where is your factory located?") === "warm", "a general question is warm");
+
+  await handleIncoming({ jid: "971509990001@s.whatsapp.net", phone: "971509990001", id: "L1", fromMe: false, pushName: "Omar", text: "Price for 10 pcs 1.5ct VS1 please?", timestamp: Date.now() - 3 * 3600000 });
+  assert(conversations.get("971509990001")?.lead?.level === "hot", "an incoming price request is marked hot");
+  assert(contacts.get("971509990001")?.lead?.level === "hot", "and so is the client");
+  await handleIncoming({ jid: "971509990001@s.whatsapp.net", phone: "971509990001", id: "L2", fromMe: false, text: "thanks", timestamp: Date.now() });
+  assert(conversations.get("971509990001").lead.level === "hot", "a later \"thanks\" does not cool a hot lead");
+  const board = leadBoard();
+  const row = board.items.find((r) => r.key === "971509990001");
+  assert(row?.waiting && board.counts.hotWaiting >= 1 && board.items[0].waiting, "the board lists them as waiting for our answer, waiting ones first");
+  await setLead("971509990001", { level: "cold" });
+  assert(!leadBoard().items.some((r) => r.key === "971509990001"), "marked done by hand, they leave the board");
+  const Inbox = await import("../src/data/inbox.js");
+  await setLead("971509990001", { level: "hot" });
+  assert(Inbox.listConversations({ filter: "hot" }).some((c) => c.phone === "971509990001"), "the inbox filters to hot leads");
+}
+
+/* ══════ Lead links & QR codes ═════════════════════════════════════════ */
+{
+  const L = await import("../src/data/leadLinks.js");
+  const B = await import("../src/data/batches.js");
+  const { conversations, leadLinks } = await import("../src/data/collections.js");
+  const batch = await B.createBatch({ name: "Vegas show leads", contactIds: [] });
+  const link = await L.createLink({ name: "JCK Las Vegas 2026", tags: ["JCK"], batchId: batch.id, welcome: "Welcome {{first_name|there}} from the JCK show!" });
+  assert(/^[A-Z0-9]{4,}$/.test(link.code), "a link gets a reference code made from its name — " + link.code);
+  let dup = null;
+  try { await L.createLink({ name: "Other", code: link.code }); } catch (e) { dup = e; }
+  assert(dup?.status === 409, "two links cannot share a code");
+  assert(L.linkUrl(L.getLink(link.id, "919876543210"), "919876543210").startsWith("https://wa.me/919876543210?text="), "the link opens a chat with the business number, message typed in");
+  const qr = await L.qrFor(link.id, "919876543210");
+  assert(qr.png.startsWith("data:image/png") && qr.svg.includes("<svg"), "and has a printable QR code");
+  let noPhone = null;
+  try { await L.qrFor(link.id, null); } catch (e) { noPhone = e; }
+  assert(noPhone?.code === "NO_PHONE", "without a known number, the QR explains instead of encoding a broken link");
+
+  await handleIncoming({ jid: "17025550111@s.whatsapp.net", phone: "17025550111", id: "Q1", fromMe: false, pushName: "Nora Blake", text: `${L.linkText(link)}`, timestamp: Date.now() });
+  const nora = contacts.get("17025550111");
+  assert(nora?.tags.includes("JCK") && nora.leadSource === "JCK Las Vegas 2026", "a message from the link tags the new client and records where they came from");
+  assert(B.batchDetail(batch.id).members.some((m) => m.id === "17025550111"), "and puts them in the link's batch");
+  assert(leadLinks.get(link.id).leads === 1 && conversations.get("17025550111").lastAutoReplyAt, "the link counts the lead and sends its welcome");
+  const { leadBoard } = await import("../src/engine/leads.js");
+  const Inbox = await import("../src/data/inbox.js");
+  assert(leadBoard().items.find((r) => r.key === "17025550111")?.waiting, "an automatic welcome is not an answer: the buyer still waits for a person");
+  await Inbox.logMessage({ phone: "17025550111", dir: "out", text: "Hi Nora, sending the catalogue now", id: "HUMAN1" });
+  assert(!leadBoard().items.find((r) => r.key === "17025550111")?.waiting, "a person's reply is");
+  await Inbox.logMessage({ phone: "17025550111", dir: "out", text: "Campaign text", campaignId: "cx", id: "CAMP1" });
+  await Inbox.logMessage({ phone: "17025550111", dir: "in", text: "Price for 5 pcs?", id: "IN9" });
+  await Inbox.logMessage({ phone: "17025550111", dir: "out", text: "Campaign text", id: "CAMP1" }); // the echo of a campaign send
+  assert(Inbox.isWaiting(conversations.get("17025550111")), "a campaign message, even echoed back, does not answer a buyer's question");
+  await handleIncoming({ jid: "17025550111@s.whatsapp.net", phone: "17025550111", id: "Q2", fromMe: false, text: `Sorry, again (Ref: ${link.code})`, timestamp: Date.now() });
+  assert(leadLinks.get(link.id).leads === 1, "the same person twice is one lead");
+  await L.updateLink(link.id, { active: false });
+  assert(L.matchLink(L.linkText(link)) === null, "a paused link no longer matches");
+  assert(L.matchLink("I need a PRICE list") === null, "ordinary words never match a link");
+}
+
+/* ══════ What the official API would have charged ══════════════════════ */
+{
+  const { rateFor, campaignSavings, totalSavings } = await import("../src/engine/savings.js");
+  assert(rateFor("971501234567") === 0.0576 && rateFor("447911123456") === 0.0635 && rateFor("919825012345") === 0.0118, "each message is priced by the recipient's country");
+  assert(rateFor("50212345678") > 0, "a country not on the card uses the \"other\" rate");
+  const c = [...campaigns.all()].find((x) => x.status === "completed" && x.audience?.mode !== "groups" && x.stats?.sent > 0);
+  const s = await campaignSavings(c);
+  assert(s.messages === c.stats.sent && s.usd > 0, "a finished campaign's saving counts every message sent — " + JSON.stringify(s));
+  assert(campaigns.get(c.id).savings?.usd === s.usd, "and is kept, not worked out again every time");
+  const t = await totalSavings();
+  assert(t.usd >= s.usd && t.inr === Math.round(t.usd * t.usdInr), "the total adds up all campaigns, in dollars and rupees");
+}
+
 /* ══════ Counters under load ═══════════════════════════════════════════ */
 {
   const { bump, getDay, todayKey } = await import("../src/data/stats.js");

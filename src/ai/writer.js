@@ -271,6 +271,45 @@ export async function suggestReply({ messages, contact, language }) {
   return { text: fillLeftovers(cleanOutput(res.text), contact ?? {}, s), model: res.settings.ai.model };
 }
 
+/**
+ * Lead Radar: how ready to buy is this client, judging by what they just wrote?
+ * Answers in JSON; anything else is treated as no answer and the caller falls
+ * back on its own rules. The summary is for the team, always in English.
+ */
+export async function classifyLead({ messages, contact }) {
+  const history = messages
+    .slice(-8)
+    .map((m) => `${m.dir === "in" ? "Client" : "Us"}: ${String(m.text || (m.mediaType ? `[${m.mediaType}]` : "")).slice(0, 400)}`)
+    .join("\n");
+  const user = [
+    "You sort incoming WhatsApp messages for a B2B diamond jewellery supplier, so the sales team answers the most valuable buyers first.",
+    "",
+    "The client:",
+    describeContact(contact ?? {}),
+    "",
+    "Conversation (oldest first; judge mainly the client's LAST message):",
+    history,
+    "",
+    "Answer with ONE line of JSON and nothing else:",
+    '{"level":"hot|warm|cold|none","intent":"order|price|catalogue|stock|meeting|question|not_interested|thanks|other","summary":"..."}',
+    "",
+    "- hot: wants to buy, asks price / quote / availability / catalogue / samples, gives quantities or specs, says yes to an offer, wants to meet.",
+    '- warm: engaged but not asking for anything concrete yet (a general question, "tell me more").',
+    "- cold: not interested, not now, asks to be contacted later.",
+    "- none: only thanks, ok, a greeting or an emoji — nothing to act on.",
+    '- summary: under 90 characters, in English, what they want in sales terms, with any numbers they gave (e.g. "Price for 20 pcs 1ct+ GIA oval solitaires"). No names.',
+  ].join("\n");
+  const res = await run([{ role: "user", content: user }], { maxTokens: 160, temperature: 0.1 });
+  const json = /\{[\s\S]*\}/.exec(res.text)?.[0];
+  if (!json) return null;
+  try {
+    const out = JSON.parse(json);
+    return { level: out.level, intent: out.intent, summary: String(out.summary ?? "").trim() };
+  } catch {
+    return null;
+  }
+}
+
 /** Settings → "Test AI": a short sample, and how long it took. */
 export async function testAi() {
   const s = getSettings();

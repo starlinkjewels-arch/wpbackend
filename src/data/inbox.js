@@ -17,15 +17,40 @@ import { getStore } from "../store/index.js";
 
 const preview = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, 140);
 
-export async function logMessage({ phone, jid, dir, text, at = Date.now(), id, name, campaignId, mediaType, manual = false }) {
+/**
+ * Is this client waiting for a person to answer? An automatic reply or a
+ * campaign message is not an answer — only something a person sent (from the
+ * inbox, or typed on the phone). Conversations saved before this was tracked
+ * fall back on "whose message is last".
+ */
+export function isWaiting(c) {
+  if (!c) return false;
+  if ("waitingSince" in c) return c.waitingSince != null;
+  return c.lastDir === "in";
+}
+
+export function waitingSinceOf(c) {
+  if (!isWaiting(c)) return null;
+  return c.waitingSince ?? c.lastAt ?? null;
+}
+
+export async function logMessage({ phone, jid, dir, text, at = Date.now(), id, name, campaignId, mediaType, manual = false, auto = false }) {
   if (!phone) return;
   const msgId = id || `local-${at}-${Math.random().toString(36).slice(2, 7)}`;
+  // The same message recorded again (an echo of our own send) keeps what it was:
+  // an automatic reply stays automatic, and never counts as a person answering.
+  if (id && dir === "out" && !auto && !campaignId) {
+    const earlier = await getStore().getDoc(`waConversations/${phone}/messages/${msgId}`).catch(() => null);
+    if (earlier?.auto) auto = true;
+    if (earlier?.campaignId) campaignId = earlier.campaignId;
+  }
   await getStore().setDoc(`waConversations/${phone}/messages/${msgId}`, {
     dir,
     text: String(text ?? "").slice(0, 8000),
     at,
     ...(campaignId ? { campaignId } : null),
     ...(mediaType ? { mediaType } : null),
+    ...(auto ? { auto: true } : null),
   });
 
   const prev = conversations.get(phone);
@@ -43,6 +68,10 @@ export async function logMessage({ phone, jid, dir, text, at = Date.now(), id, n
     hasInbound: Boolean(prev?.hasInbound || dir === "in"),
     manual: Boolean(prev?.manual || manual),
   };
+  const personAnswered = dir === "out" && !campaignId && !auto;
+  if (dir === "in") doc.waitingSince = isWaiting(prev) ? waitingSinceOf(prev) ?? at : at;
+  else if (personAnswered) doc.waitingSince = null;
+  else doc.waitingSince = prev ? waitingSinceOf(prev) : null;
   // An old message arriving late (history sync) must not replace a newer preview.
   if (prev && at < (prev.lastAt ?? 0)) {
     doc.lastText = prev.lastText;
@@ -57,6 +86,8 @@ export function listConversations({ q = "", filter = "all" } = {}, lookupContact
     .all()
     .filter((c) => c.hasInbound || c.manual)
     .filter((c) => filter !== "unread" || c.unread > 0)
+    .filter((c) => filter !== "hot" || c.lead?.level === "hot")
+    .filter((c) => filter !== "waiting" || isWaiting(c))
     .map((c) => {
       const contact = lookupContact(c.phone);
       return {

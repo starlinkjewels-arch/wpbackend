@@ -31,6 +31,18 @@ import { dailyCap } from "../engine/rules.js";
 import { renderMessage, varsForContact, missingVarCounts, BUILT_IN_VARS } from "../engine/personalize.js";
 import { estimateDurationMs, SPEEDS } from "../engine/rules.js";
 import { formatPhone } from "../phone.js";
+import * as L from "../data/leadLinks.js";
+import { leadBoard, setLead } from "../engine/leads.js";
+import { totalSavings, campaignSavings, MARKETING_RATES, DEFAULT_RATE, RATES_AS_OF, USD_INR } from "../engine/savings.js";
+
+/** The business's WhatsApp number: live when connected, else the last one seen. */
+function businessPhone() {
+  const live = wa.state.phone;
+  if (live && dataState.ready && getSettings().businessPhone !== live) {
+    updateSettings({ businessPhone: live }).catch(() => {});
+  }
+  return live || (dataState.ready ? getSettings().businessPhone : "") || null;
+}
 
 export const api = express.Router();
 
@@ -95,6 +107,7 @@ function waStatus() {
 }
 
 api.get("/status", (_req, res) => {
+  if (dataState.ready) businessPhone(); // remember the number for lead links
   const settings = dataState.ready ? getSettings() : null;
   res.json({
     demo: DEMO_MODE,
@@ -103,6 +116,7 @@ api.get("/status", (_req, res) => {
     dataError: dataState.error,
     wa: waStatus(),
     unread: dataState.ready ? Inbox.unreadTotal() : 0,
+    hotWaiting: dataState.ready ? leadBoard({ limit: 0 }).counts.hotWaiting : 0,
     runner: { activeId: runner.activeId, waiting: runner.waiting },
     sentToday: dataState.ready ? getDay(todayKey()).sent : 0,
     // Today's real cap: lower than the setting while warm-up is on.
@@ -118,7 +132,7 @@ api.post("/wa/disconnect", h(async () => {
 
 /* ── Home ────────────────────────────────────────────────────────────── */
 
-api.get("/dashboard", h(() => {
+api.get("/dashboard", h(async () => {
   const settings = getSettings();
   const all = Camp.listCampaigns();
   const recentInquiries = contacts
@@ -137,6 +151,8 @@ api.get("/dashboard", h(() => {
     recentInquiries,
     unread: Inbox.unreadTotal(),
     health: accountHealth(),
+    leads: { ...leadBoard({ limit: 6 }), alertHours: settings.leadRadar.alertHours, enabled: settings.leadRadar.enabled },
+    savings: await totalSavings(),
     onboarding: {
       connected: wa.state.status === "connected",
       hasContacts: contacts.size > 0,
@@ -273,6 +289,12 @@ api.get("/campaigns/:id", h((req) => {
   if (!c) throw C.fail("Campaign not found", "NOT_FOUND", 404);
   return view(c);
 }));
+api.get("/campaigns/:id/savings", h(async (req) => {
+  const c = campaigns.get(req.params.id);
+  if (!c) throw C.fail("Campaign not found", "NOT_FOUND", 404);
+  const s = await campaignSavings(c);
+  return { ...s, inr: Math.round(s.usd * USD_INR), groups: c.audience?.mode === "groups" };
+}));
 api.get("/campaigns/:id/recipients", h((req) => getRecipients(req.params.id, req.query)));
 api.post("/campaigns", express.json({ limit: "5mb" }), h(async (req) => view(await Camp.createCampaign(req.body ?? {}))));
 api.put("/campaigns/:id", express.json({ limit: "5mb" }), h(async (req) => view(await Camp.updateCampaign(req.params.id, req.body ?? {}))));
@@ -326,6 +348,8 @@ api.get("/conversations/:key", h(async (req) => {
   await Inbox.markRead(key);
   return { key, conversation: conv, contact, messages };
 }));
+
+api.put("/conversations/:key/lead", express.json(), h((req) => setLead(req.params.key, req.body ?? {})));
 
 api.post("/conversations/:key/read", h(async (req) => { await Inbox.markRead(req.params.key); }));
 
@@ -513,6 +537,24 @@ api.get("/status-posts", h((req) => ({
   audienceCount: statusAudienceCount({ mode: req.query.tag ? "tags" : "all", tags: req.query.tag ? String(req.query.tag).split(",") : [] }),
 })));
 api.post("/status-posts", express.json(), h((req) => postToStatus(req.body ?? {})));
+
+/* ── Lead Radar & lead links ─────────────────────────────────────────── */
+
+api.get("/leads", h((req) => ({ ...leadBoard({ limit: Math.min(200, Number(req.query.limit) || 100) }), alertHours: getSettings().leadRadar.alertHours })));
+
+api.get("/lead-links", h(() => {
+  const phone = businessPhone();
+  return { items: L.listLinks(phone), phone, phoneDisplay: phone ? formatPhone(phone) : null, sources: L.SOURCES };
+}));
+api.get("/lead-links/suggest-code", h((req) => ({ code: L.suggestCode(String(req.query.name ?? "")) })));
+api.post("/lead-links", express.json(), h(async (req) => L.getLink((await L.createLink(req.body ?? {})).id, businessPhone())));
+api.put("/lead-links/:id", express.json(), h(async (req) => { await L.updateLink(req.params.id, req.body ?? {}); return L.getLink(req.params.id, businessPhone()); }));
+api.delete("/lead-links/:id", h(async (req) => { await L.deleteLink(req.params.id); }));
+api.get("/lead-links/:id/qr", h((req) => L.qrFor(req.params.id, businessPhone())));
+
+/* ── Why this and not the official API ───────────────────────────────── */
+
+api.get("/savings", h(async () => ({ ...(await totalSavings()), rates: MARKETING_RATES, defaultRate: DEFAULT_RATE, ratesAsOf: RATES_AS_OF })));
 
 /* ── Inbox: a suggested reply ────────────────────────────────────────── */
 

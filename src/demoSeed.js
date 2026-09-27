@@ -3,7 +3,8 @@
  * so every screen has something on it the first time someone opens the demo.
  * Never runs against a real database.
  */
-import { contacts, campaigns, dailyStats, settingsCol, batches } from "./data/collections.js";
+import { contacts, campaigns, dailyStats, settingsCol, batches, leadLinks, conversations } from "./data/collections.js";
+import { quickRead } from "./engine/leads.js";
 import { writeRecipients } from "./data/recipients.js";
 import { logMessage } from "./data/inbox.js";
 import { DEFAULTS } from "./data/settings.js";
@@ -138,5 +139,31 @@ export async function seedDemo() {
     stats: { total: vip.length, pending: 0, sent: vip.length, failed: 0, skipped: 0, delivered: vip.length, read: Math.ceil(vip.length / 2), replied: Math.min(2, vip.length), optedOut: 0 },
     createdAt: now - 3 * 86400000, updatedAt: now - 2 * 86400000, startedAt: now - 2 * 86400000, finishedAt: now - 2 * 86400000 + 200000,
   });
+  // Lead links, as if used at a show and on the website.
+  await leadLinks.put("lldemo1", {
+    name: "Hong Kong Fair — Sept 2026", code: "HKF2026", source: "event",
+    prefill: "Hello Starlink Jewels, we met at the Hong Kong Jewellery Fair. Please share your latest collection and B2B prices.",
+    tags: ["Hong Kong Show"], batchId: "bdemo2", active: true,
+    welcome: "Dear {{first_name|Sir/Madam}},\n\nThank you for visiting us at the Hong Kong Fair 💎 Our team will send you the new collection with B2B prices shortly.\n\n— {{business_name}}",
+    leads: 3, lastLeadAt: now - 5 * 3600000, createdAt: now - 9 * 86400000, updatedAt: now - 9 * 86400000,
+  });
+  await leadLinks.put("lldemo2", {
+    name: "Website — WhatsApp button", code: "WEBSITE", source: "website",
+    prefill: "Hello, I found you on your website and would like to know more about your diamond jewellery.",
+    tags: ["Website"], batchId: null, active: true, welcome: "",
+    leads: 5, lastLeadAt: now - 2 * 3600000, createdAt: now - 20 * 86400000, updatedAt: now - 20 * 86400000,
+  });
+
+  // Lead Radar verdicts for the conversations above (the live app does this as messages arrive).
+  const seen = [
+    ["971585551234", inquiries[0][2], now - 2 * 3600000],
+    ["85298887777", inquiries[1][2], now - 2 * 3600000],
+    ...replies.map(([p, , t], i) => [p, t, now - (20 - i * 6) * 3600000]),
+  ];
+  for (const [phone, text, at] of seen) {
+    const v = quickRead(text);
+    await conversations.patch(phone, { lead: { ...v, by: "rules", at, ...(v.level === "hot" ? { firstHotAt: at } : null) } });
+    await contacts.patch(phone, { lead: { level: v.level, intent: v.intent, summary: v.summary, at } });
+  }
   console.log("[demo] sample data loaded");
 }

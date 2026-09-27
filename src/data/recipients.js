@@ -52,6 +52,19 @@ export async function loadRecipients(id, chunkCount) {
   return entry;
 }
 
+/**
+ * Read a list without putting it in the cache. For reports that walk many
+ * campaigns: caching each would push out the one being sent right now, and
+ * the runner would then save its progress into a list nobody writes back.
+ */
+export async function peekRecipients(id, chunkCount) {
+  const hit = cache.get(id);
+  if (hit) return hit;
+  const chunks = [];
+  for (let n = 0; n < (chunkCount ?? 0); n += 1) chunks.push((await getStore().getDoc(path(id, n)))?.items ?? []);
+  return { chunks, dirty: new Set() };
+}
+
 /** Find the next recipient still to be sent. Returns a handle for updating it. */
 export function nextPending(entry) {
   for (let n = 0; n < entry.chunks.length; n += 1) {
