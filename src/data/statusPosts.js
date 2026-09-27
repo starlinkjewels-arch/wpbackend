@@ -39,7 +39,7 @@ export async function postToStatus({ text, caption, mediaId, audience, backgroun
   } else if (!String(text ?? "").trim()) {
     throw fail("Write a text or attach a photo or video");
   }
-  const color = /^#[0-9a-f]{6}$/i.test(String(backgroundColor)) ? backgroundColor : "#0b7a5c";
+  const color = /^#[0-9a-f]{6}$/i.test(String(backgroundColor)) ? backgroundColor : "#6d4aff";
   const res = await wa.postStatus({
     text: String(text ?? "").slice(0, 700),
     caption: String(caption ?? "").slice(0, 1000),

@@ -295,7 +295,7 @@ export async function listGroups() {
  * Post to WhatsApp Status. Status goes to an explicit list of people — WhatsApp
  * then shows it to those of them who also have this number saved.
  */
-export async function postStatus({ text, media, caption, jids, backgroundColor = "#0b7a5c", font = 1 }) {
+export async function postStatus({ text, media, caption, jids, backgroundColor = "#6d4aff", font = 1 }) {
   const sock = needSocket();
   let content;
   if (media?.buffer) {
