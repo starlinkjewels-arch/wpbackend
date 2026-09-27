@@ -23,6 +23,7 @@ import { saveMedia, getMedia, deleteMedia, MAX_MEDIA_BYTES } from "../data/media
 import { runner, pauseCampaign, resumeCampaign, cancelCampaign, retryFailed, getRecipients, estimateFinish, sendTest, followUp } from "../engine/runner.js";
 import { accountHealth } from "../engine/health.js";
 import * as G from "../data/groups.js";
+import * as B from "../data/batches.js";
 import { groups as groupsCol } from "../data/collections.js";
 import { postToStatus, listStatusPosts, statusAudienceCount } from "../data/statusPosts.js";
 import { startVerify, verifyStatus, cancelVerify } from "../engine/verify.js";
@@ -152,6 +153,7 @@ const filtersFrom = (q) => ({
   tag: q.tag ? String(q.tag).split(",").filter(Boolean) : [],
   status: q.status ?? "all",
   source: q.source ?? "",
+  batch: q.batch ?? "",
 });
 
 api.get("/contacts", h((req) => ({
@@ -170,7 +172,13 @@ api.post("/contacts/verify", express.json({ limit: "5mb" }), h((req) => {
 }));
 api.post("/contacts/verify/cancel", h(() => { cancelVerify(); return { job: verifyStatus() }; }));
 api.get("/contacts/export", h((req) => ({ items: C.filterContacts(filtersFrom(req.query)) })));
-api.get("/contacts/meta", h(() => ({ tags: C.tagSummary(), fields: C.customFields(), builtIn: BUILT_IN_VARS, counts: C.contactCounts() })));
+api.get("/contacts/meta", h(() => ({
+  tags: C.tagSummary(),
+  fields: C.customFields(),
+  builtIn: BUILT_IN_VARS,
+  counts: C.contactCounts(),
+  batches: B.listBatches().map((b) => ({ id: b.id, name: b.name, color: b.color, members: b.members })),
+})));
 
 api.get("/contacts/:id", h((req) => {
   const c = contacts.get(req.params.id);
@@ -440,6 +448,20 @@ api.delete("/campaigns/:id/ai/:phone", h(async (req) => {
   needCampaign(req.params.id);
   await removeDraft(req.params.id, req.params.phone);
 }));
+
+/* ── Client batches ──────────────────────────────────────────────────── */
+
+/** Clients chosen by id, or everyone matching the Clients page's filters. */
+const pickIds = (body) => (Array.isArray(body?.ids) ? body.ids.map(String) : C.filterContacts(filtersFrom(body?.filter ?? {})).map((c) => c.id));
+
+api.get("/batches", h((req) => ({ items: B.listBatches({ q: req.query.q }), colors: B.COLORS })));
+api.post("/batches", express.json({ limit: "5mb" }), h((req) => B.createBatch({ ...(req.body ?? {}), contactIds: pickIds(req.body) })));
+api.get("/batches/:id", h((req) => B.batchDetail(req.params.id)));
+api.put("/batches/:id", express.json(), h((req) => B.updateBatch(req.params.id, req.body ?? {})));
+api.delete("/batches/:id", h(async (req) => { await B.deleteBatch(req.params.id); }));
+api.post("/batches/:id/members", express.json({ limit: "5mb" }), h((req) => B.addMembers(req.params.id, pickIds(req.body))));
+api.post("/batches/:id/members/remove", express.json({ limit: "5mb" }), h((req) => B.removeMembers(req.params.id, req.body?.ids ?? [])));
+api.get("/contacts/:id/batches", h((req) => ({ items: B.batchesOf(req.params.id) })));
 
 /* ── WhatsApp groups ─────────────────────────────────────────────────── */
 

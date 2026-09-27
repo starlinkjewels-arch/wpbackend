@@ -97,7 +97,9 @@ export const settingsCol = new CachedCollection("waSettings");
 export const groups = new CachedCollection("waGroups");
 export const statusPosts = new CachedCollection("waStatusPosts");
 
-const ALL = [contacts, campaigns, templates, conversations, mediaIndex, dailyStats, settingsCol, groups, statusPosts];
+export const batches = new CachedCollection("waBatches");
+
+const ALL = [contacts, campaigns, templates, conversations, mediaIndex, dailyStats, settingsCol, groups, statusPosts, batches];
 
 export const dataState = { ready: false, error: null };
 

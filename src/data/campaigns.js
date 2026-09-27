@@ -18,6 +18,7 @@ import { getSettings } from "./settings.js";
 import { fail, splitTags, resolveAudience } from "./contacts.js";
 import { deleteRecipients } from "./recipients.js";
 import { deleteDrafts } from "./aiDrafts.js";
+import { batchNames } from "./batches.js";
 
 /** Can still be changed: nothing has been sent. */
 export const EDITABLE = new Set(["draft", "scheduled"]);
@@ -29,8 +30,12 @@ const clamp = (v, lo, hi, d) => {
 };
 
 function cleanAudience(a = {}) {
-  const mode = ["all", "tags", "contacts", "groups"].includes(a.mode) ? a.mode : "all";
+  const mode = ["all", "tags", "contacts", "groups", "batch"].includes(a.mode) ? a.mode : "all";
+  const batchIds = mode === "batch" ? [...new Set((a.batchIds ?? []).map(String))].slice(0, 50) : [];
   return {
+    batchIds,
+    // Names kept on the broadcast, so its history still reads right if a batch is later renamed or deleted.
+    batchNames: mode === "batch" ? batchIds.map((id) => batchNames([id])[0] ?? a.batchNames?.[a.batchIds?.indexOf(id)] ?? "Deleted batch") : [],
     mode,
     tags: mode === "tags" ? splitTags(a.tags ?? []) : [],
     tagMatch: a.tagMatch === "all" ? "all" : "any",

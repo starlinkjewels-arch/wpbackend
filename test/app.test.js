@@ -535,6 +535,43 @@ async function drain(id, max = 50) {
   await assertRejects(() => postToStatus({ text: "", audience: { mode: "all" } }), "BAD_REQUEST", "an empty status is refused");
 }
 
+/* ══════ Client batches ═══════════════════════════════════════════════ */
+{
+  const B = await import("../src/data/batches.js");
+  const uk = ["447911123450", "447911123451", "447911123452"];
+  const b = await B.createBatch({ name: "UK buyers Oct", description: "From the London show", color: "blue", contactIds: [...uk, "999999999"] });
+  assert(b.members === 3 && b.color === "blue", "a batch keeps only real clients — " + JSON.stringify(b));
+  await assertRejects(() => B.createBatch({ name: "uk BUYERS oct" }), "EXISTS", "two batches cannot share a name");
+  await assertRejects(() => B.createBatch({ name: "  " }), "BAD_REQUEST", "a batch needs a name");
+
+  const add = await B.addMembers(b.id, ["447911123453", uk[0]]);
+  assert(add.added === 1 && add.members === 4, "adding members skips ones already in it");
+  const rm = await B.removeMembers(b.id, [uk[2]]);
+  assert(rm.removed === 1 && rm.members === 3, "members can be removed");
+
+  const c = await Camp.createCampaign({ name: "Batch send", message: "Hi {{first_name|there}}", audience: { mode: "batch", batchIds: [b.id] }, action: "schedule" });
+  assert(campaigns.get(c.id).audience.batchNames[0] === "UK buyers Oct", "a broadcast remembers the batch name");
+  const done = await drain(c.id);
+  assert(done.stats.total === 3 && done.stats.sent === 3, "a broadcast to a batch reaches exactly its members — " + JSON.stringify(done.stats));
+
+  const d = B.batchDetail(b.id);
+  assert(d.history.length === 1 && d.history[0].stats.sent === 3 && d.totals.broadcasts === 1 && d.totals.sent === 3, "the batch's history lists what was sent and the results");
+  assert(d.members.length === 3 && d.lastSentAt > 0, "the batch lists its members and when it last received a broadcast");
+
+  await B.updateBatch(b.id, { name: "UK VIP buyers" });
+  assert(B.batchDetail(b.id).name === "UK VIP buyers" && campaigns.get(c.id).audience.batchNames[0] === "UK buyers Oct", "renaming a batch keeps old broadcasts' record intact");
+
+  // A client whose number changes stays in the batch.
+  const moved = await C.updateContact(uk[0], { phone: "+44 7911 123499" });
+  assert(B.batchesOf(moved.id).some((x) => x.id === b.id) && !B.batchesOf(uk[0]).length, "a changed number keeps its batch memberships");
+  // A deleted client simply leaves.
+  await C.deleteContacts([uk[1]]);
+  assert(B.batchDetail(b.id).members.length === 2, "a deleted client drops out of the batch");
+  assert(C.filterContacts({ batch: b.id }).length === 2, "clients can be filtered by batch");
+  await B.deleteBatch(b.id);
+  assert(campaigns.has(c.id), "deleting a batch keeps its broadcasts");
+}
+
 /* ══════ Counters under load ═══════════════════════════════════════════ */
 {
   const { bump, getDay, todayKey } = await import("../src/data/stats.js");

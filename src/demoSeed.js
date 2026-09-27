@@ -3,7 +3,7 @@
  * so every screen has something on it the first time someone opens the demo.
  * Never runs against a real database.
  */
-import { contacts, campaigns, dailyStats, settingsCol } from "./data/collections.js";
+import { contacts, campaigns, dailyStats, settingsCol, batches } from "./data/collections.js";
 import { writeRecipients } from "./data/recipients.js";
 import { logMessage } from "./data/inbox.js";
 import { DEFAULTS } from "./data/settings.js";
@@ -115,5 +115,28 @@ export async function seedDemo() {
   }
   daily[daily.length - 1] = { ...daily[daily.length - 1], sent: 0, failed: 0, inbound: 2, newContacts: 2 };
   await dailyStats.putMany(daily.map((d) => ({ ...d, date: d.id })));
+  // Two client batches, one with a broadcast already sent to it.
+  const vip = PEOPLE.filter((p) => p[5].includes("VIP")).map((p) => p[2]);
+  const hk = PEOPLE.filter((p) => p[5].includes("Hong Kong Show")).map((p) => p[2]);
+  await batches.put("bdemo1", {
+    name: "VIP partners", description: "Top wholesale and retail partners — first to see every new collection.",
+    color: "violet", contactIds: vip, createdAt: now - 10 * 86400000, updatedAt: now - 2 * 86400000,
+  });
+  await batches.put("bdemo2", {
+    name: "Hong Kong show leads", description: "Buyers met at the September Hong Kong Jewellery & Gem Fair.",
+    color: "pink", contactIds: hk, createdAt: now - 6 * 86400000, updatedAt: now - 6 * 86400000,
+  });
+  await writeRecipients("cdemo4", vip.map((p, i) => {
+    const t = now - 2 * 86400000 + i * 25000;
+    return { p, n: PEOPLE.find((x) => x[2] === p)[0], s: "sent", t, d: t + 3000, ...(i % 2 === 0 ? { r: t + 900000 } : null), ...(i < 2 ? { rp: t + 5400000 } : null) };
+  }));
+  await campaigns.put("cdemo4", {
+    name: "VIP preview — oval solitaires", status: "completed", materialized: true, chunkCount: 1,
+    message: "Dear {{first_name|Sir/Madam}},\n\nAs one of our *VIP partners*, you get the first look at our new oval solitaire collection — GIA certified, 1 to 3 carats.\n\nReply *YES* for the video catalogue.\n\n— {{business_name}}",
+    mediaId: null, audience: { mode: "batch", batchIds: ["bdemo1"], batchNames: ["VIP partners"], tags: [], tagMatch: "any", contactIds: [], excludeTags: [] },
+    minDelay: 12, maxDelay: 30, scheduledAt: now - 2 * 86400000,
+    stats: { total: vip.length, pending: 0, sent: vip.length, failed: 0, skipped: 0, delivered: vip.length, read: Math.ceil(vip.length / 2), replied: Math.min(2, vip.length), optedOut: 0 },
+    createdAt: now - 3 * 86400000, updatedAt: now - 2 * 86400000, startedAt: now - 2 * 86400000, finishedAt: now - 2 * 86400000 + 200000,
+  });
   console.log("[demo] sample data loaded");
 }

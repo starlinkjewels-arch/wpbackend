@@ -11,6 +11,7 @@ import { getSettings } from "./settings.js";
 import { normalizePhone, countryFromText } from "../phone.js";
 import { bump } from "./stats.js";
 import { resolveGroups } from "./groups.js";
+import { batchMemberIds, renameMember } from "./batches.js";
 
 export const IMPORT_TARGETS = [
   "name",
@@ -79,15 +80,17 @@ function matchesQuery(c, q) {
     .every((word) => hay.includes(word) || (digits.length >= 3 && String(c.phone).includes(digits)));
 }
 
-export function filterContacts({ q = "", tag = "", status = "all", source = "" } = {}) {
+export function filterContacts({ q = "", tag = "", status = "all", source = "", batch = "" } = {}) {
   const query = String(q).trim();
   const tags = Array.isArray(tag) ? tag : tag ? [tag] : [];
+  const inBatch = batch ? new Set(batchMemberIds([batch])) : null;
   return contacts.all().filter(
     (c) =>
       matchesQuery(c, query) &&
       tags.every((t) => hasTag(c, t)) &&
       (status === "all" || statusOf(c) === status) &&
-      (!source || c.source === source),
+      (!source || c.source === source) &&
+      (!inBatch || inBatch.has(c.id)),
   );
 }
 
@@ -207,6 +210,7 @@ export async function updateContact(id, input) {
       const moved = { ...prev, ...patch, phone: parsed.phone, waStatus: "unknown" };
       await contacts.put(parsed.phone, moved);
       await contacts.remove(prev.phone);
+      await renameMember(prev.phone, parsed.phone);
       return contacts.get(parsed.phone);
     }
   }
@@ -393,7 +397,9 @@ export function resolveAudience(audience = {}) {
   // A broadcast to WhatsApp groups: one message per group, not per person.
   if (mode === "groups") return resolveGroups(audience);
   let pool;
-  if (mode === "contacts") {
+  if (mode === "batch") {
+    pool = batchMemberIds(audience.batchIds ?? []).map((id) => contacts.get(id)).filter(Boolean);
+  } else if (mode === "contacts") {
     pool = (audience.contactIds ?? []).map((id) => contacts.get(id)).filter(Boolean);
   } else if (mode === "tags") {
     const tags = splitTags(audience.tags ?? []);
