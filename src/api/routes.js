@@ -22,6 +22,9 @@ import { getDay, todayKey, lastDays, bump } from "../data/stats.js";
 import { saveMedia, getMedia, deleteMedia, MAX_MEDIA_BYTES } from "../data/media.js";
 import { runner, pauseCampaign, resumeCampaign, cancelCampaign, retryFailed, getRecipients, estimateFinish, sendTest, followUp } from "../engine/runner.js";
 import { accountHealth } from "../engine/health.js";
+import * as G from "../data/groups.js";
+import { groups as groupsCol } from "../data/collections.js";
+import { postToStatus, listStatusPosts, statusAudienceCount } from "../data/statusPosts.js";
 import { startVerify, verifyStatus, cancelVerify } from "../engine/verify.js";
 import { dailyCap } from "../engine/rules.js";
 import { renderMessage, varsForContact, missingVarCounts, BUILT_IN_VARS } from "../engine/personalize.js";
@@ -219,8 +222,9 @@ api.post("/audience/preview", express.json({ limit: "5mb" }), h((req) => {
   return {
     count: eligible.length,
     excluded,
-    sample: eligible.slice(0, 8).map((c) => ({ id: c.id, name: c.name, company: c.company, phone: c.phone })),
-    missing: message ? missingVarCounts(message, eligible) : [],
+    sample: eligible.slice(0, 8).map((c) => ({ id: c.id, name: c.name, company: c.kind === "group" ? `${c.size ?? 0} members` : c.company, phone: c.phone, isGroup: c.kind === "group" })),
+    // Client variables mean nothing to a group; only {{group_name}} is filled.
+    missing: message && audience?.mode !== "groups" ? missingVarCounts(message, eligible) : [],
     estimateMs: estimateDurationMs(eligible.length, settings.minDelay, settings.maxDelay),
   };
 }));
@@ -228,6 +232,10 @@ api.post("/audience/preview", express.json({ limit: "5mb" }), h((req) => {
 api.post("/render", express.json(), h((req) => {
   const { message, contactId } = req.body ?? {};
   const settings = getSettings();
+  const group = contactId && String(contactId).endsWith("@g.us") ? groupsCol.get(contactId) : null;
+  if (group) {
+    return { text: renderMessage(message, { groupname: group.name, businessname: settings.businessName }), contact: { id: group.id, name: group.name } };
+  }
   const sample = (contactId && contacts.get(contactId)) || contacts.all()[0] || { name: "Rahul Mehta", company: "Mehta Gems", city: "Dubai", country: "AE" };
   return { text: renderMessage(message, varsForContact(sample, { business_name: settings.businessName })), contact: { id: sample.id ?? null, name: sample.name } };
 }));
@@ -432,6 +440,57 @@ api.delete("/campaigns/:id/ai/:phone", h(async (req) => {
   needCampaign(req.params.id);
   await removeDraft(req.params.id, req.params.phone);
 }));
+
+/* ── WhatsApp groups ─────────────────────────────────────────────────── */
+
+api.get("/groups", h(async (req) => {
+  // Fresh from WhatsApp when the copy is old and the number is connected.
+  let syncError = null;
+  if ((req.query.sync === "1" || !G.recentlySynced()) && wa.state.status === "connected") {
+    await G.syncGroups().catch((err) => { syncError = err.message; });
+  }
+  return {
+    items: G.listGroups({ q: req.query.q, tag: req.query.tag, show: req.query.show }),
+    tags: G.groupTags(),
+    syncedAt: G.lastSyncedAt() || null,
+    syncError,
+    connected: wa.state.status === "connected",
+  };
+}));
+
+api.post("/groups/sync", h(() => G.syncGroups()));
+api.get("/groups/:id", h((req) => G.groupDetail(req.params.id)));
+api.put("/groups/:id", express.json(), h((req) => G.updateGroup(req.params.id, req.body ?? {})));
+api.post("/groups/:id/import", express.json(), h((req) => G.importMembers(req.params.id, req.body ?? {})));
+
+/** One message into one group, now — for a quick post; broadcasts do many. */
+api.post("/groups/:id/send", express.json(), h(async (req) => {
+  const g = groupsCol.get(req.params.id);
+  if (!g || g.left) throw C.fail("You are no longer in this group", "NOT_FOUND", 404);
+  if (!g.canSend) throw C.fail("Only admins can post in this group", "NOT_ALLOWED", 409);
+  const text = String(req.body?.text ?? "").trim();
+  const mediaId = req.body?.mediaId;
+  if (!text && !mediaId) throw C.fail("Type a message first");
+  let media;
+  if (mediaId) {
+    const m = await getMedia(mediaId);
+    if (!m) throw C.fail("The attached file is missing");
+    media = { buffer: m.buffer, mimetype: m.meta.mimetype, fileName: m.meta.name };
+  }
+  const settings = getSettings();
+  const res = await wa.sendMessage({ jid: g.id, message: renderMessage(text, { groupname: g.name, businessname: settings.businessName }), media });
+  await bump("sent");
+  await groupsCol.patch(g.id, { lastPostAt: Date.now() });
+  return { ok: true, messageId: res.messageId };
+}));
+
+/* ── WhatsApp Status ─────────────────────────────────────────────────── */
+
+api.get("/status-posts", h((req) => ({
+  items: listStatusPosts().map((p) => ({ ...p, media: p.mediaId ? mediaView(mediaIndex.get(p.mediaId)) : null })),
+  audienceCount: statusAudienceCount({ mode: req.query.tag ? "tags" : "all", tags: req.query.tag ? String(req.query.tag).split(",") : [] }),
+})));
+api.post("/status-posts", express.json(), h((req) => postToStatus(req.body ?? {})));
 
 /* ── Inbox: a suggested reply ────────────────────────────────────────── */
 

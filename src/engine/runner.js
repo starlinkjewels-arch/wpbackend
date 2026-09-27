@@ -17,7 +17,7 @@
  * resend of a message that did go out is answered "already sent", not repeated.
  */
 import wa from "../wa.js";
-import { campaigns, contacts, dataState, newId } from "../data/collections.js";
+import { campaigns, contacts, groups, dataState, newId } from "../data/collections.js";
 import * as R from "../data/recipients.js";
 import { resolveAudience, fail } from "../data/contacts.js";
 import { getSettings } from "../data/settings.js";
@@ -219,7 +219,8 @@ async function begin(c, now) {
     return campaigns.patch(c.id, { status: "running", startedAt: c.startedAt ?? now });
   }
   const { eligible } = resolveAudience(c.audience);
-  const items = eligible.map((ct) => ({ p: ct.id, n: ct.name || "", s: "pending" }));
+  // k: "g" marks a WhatsApp group; everything else is a client.
+  const items = eligible.map((ct) => ({ p: ct.id, n: ct.name || "", s: "pending", ...(ct.kind === "group" ? { k: "g" } : null) }));
   const chunkCount = await R.writeRecipients(c.id, items);
   const stats = { total: items.length, pending: items.length, sent: 0, failed: 0, skipped: 0 };
   if (!items.length) {
@@ -253,7 +254,54 @@ function mediaLabel(meta) {
   return meta.kind === "image" ? "Photo" : meta.kind === "video" ? "Video" : meta.name;
 }
 
+/**
+ * Posting a broadcast into one WhatsApp group. The same safety rules apply —
+ * gap, breaks, daily cap — but there is no client to personalise for, so the
+ * only variable is {{group_name}}. Checked again at send time: the number may
+ * have left the group, or lost admin rights in an admins-only group.
+ */
+async function sendToGroup(c, entry, handle, settings) {
+  const g = groups.get(handle.r.p);
+  const skip = !g || g.left ? "No longer in this group" : !g.canSend ? "Only admins can post in this group" : null;
+  if (skip) {
+    R.updateRecipient(entry, handle, { s: "skipped", e: skip, t: Date.now() });
+    return save(c.id, entry);
+  }
+  let media = null;
+  if (c.mediaId) {
+    media = await getMedia(c.mediaId).catch(() => null);
+    if (!media) return pause(c.id, "The attached file could not be loaded — it may have been deleted");
+  }
+  const text = renderMessage(c.message, { groupname: g.name, businessname: settings.businessName });
+  try {
+    const res = await wa.sendMessage({
+      jid: g.id,
+      message: text,
+      media: media ? { buffer: media.buffer, mimetype: media.meta.mimetype, fileName: media.meta.name } : undefined,
+      clientMessageId: `c_${c.id}_${g.id.split("@")[0]}`,
+      typingMs: typingTime(text, settings),
+    });
+    R.updateRecipient(entry, handle, { s: "sent", t: Date.now(), m: res.messageId ?? null });
+    consecutiveErrors = 0;
+    await bump("sent");
+    await groups.patch(g.id, { lastPostAt: Date.now() });
+    runner.nextSendAt = Date.now() + randomGapMs(c.minDelay, c.maxDelay);
+  } catch (err) {
+    if (err.code === "NOT_CONNECTED") return wait(c.id, "disconnected", "Waiting for WhatsApp to connect");
+    consecutiveErrors += 1;
+    R.updateRecipient(entry, handle, { s: "failed", e: err.message?.slice(0, 200) || "Failed", t: Date.now() });
+    runner.nextSendAt = Date.now() + randomGapMs(c.minDelay, c.maxDelay);
+    await bump("failed");
+    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+      await save(c.id, entry);
+      return pause(c.id, `Stopped after ${MAX_CONSECUTIVE_ERRORS} failures in a row. Last error: ${err.message}`);
+    }
+  }
+  await save(c.id, entry);
+}
+
 async function sendOne(c, entry, handle, settings) {
+  if (handle.r.k === "g") return sendToGroup(c, entry, handle, settings);
   const now = Date.now();
   const contact = contacts.get(handle.r.p);
 
@@ -457,9 +505,12 @@ function paginate(items, { status, q, page, pageSize }) {
     page: p,
     pageSize: size,
     items: filtered.slice((p - 1) * size, p * size).map((r) => {
-      const ct = contacts.get(r.p);
+      const isGroup = r.k === "g" || String(r.p).endsWith("@g.us");
+      const ct = isGroup ? null : contacts.get(r.p);
+      const g = isGroup ? groups.get(r.p) : null;
       return {
-        phone: r.p, name: ct?.name || r.n || "", company: ct?.company || "", status: r.s, error: r.e ?? null, at: r.t ?? null,
+        isGroup,
+        phone: r.p, name: g?.name || ct?.name || r.n || "", company: g ? `${g.size ?? 0} members` : ct?.company || "", status: r.s, error: r.e ?? null, at: r.t ?? null,
         deliveredAt: r.d ?? null, readAt: r.r ?? null, repliedAt: r.rp ?? null, optedOutAt: r.oo ?? null,
       };
     }),

@@ -21,6 +21,23 @@ What it does:
   `src/ai/writer.js`; the admin manages model, tone, language, business facts
   and the key in Settings → AI writer.
 
+### Broadcasts, groups and Status
+
+"Broadcasts" in the app (campaigns in the code) go to each recipient
+individually — unlike WhatsApp's own broadcast lists, which only reach people
+who saved the business's number. A broadcast's audience is clients (all, by
+tag, picked) or **WhatsApp groups** (picked, or by group tag): one post per
+group, same gaps, breaks and daily cap, `{{group_name}}` as the only variable,
+groups where only admins may post (and we are not admin) skipped at send time.
+
+- **Groups** (`src/data/groups.js`): synced from WhatsApp (`listGroups` in
+  `whatsapp.js`), kept in `waGroups` with the business's own tags and note.
+  Members can be saved as clients (tagged) or exported; one-off posts to a
+  single group go straight out.
+- **Status** (`src/data/statusPosts.js`): a text, photo or video posted to
+  WhatsApp Status for all clients or tags (opted-out never). WhatsApp shows it
+  only to people who have the number saved; it lasts 24 hours.
+
 ### Sending safety (Settings → Sending safety)
 
 WhatsApp publishes no daily limit for a normal number; it watches behaviour.

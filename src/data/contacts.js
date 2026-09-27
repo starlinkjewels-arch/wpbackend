@@ -10,6 +10,7 @@ import { contacts } from "./collections.js";
 import { getSettings } from "./settings.js";
 import { normalizePhone, countryFromText } from "../phone.js";
 import { bump } from "./stats.js";
+import { resolveGroups } from "./groups.js";
 
 export const IMPORT_TARGETS = [
   "name",
@@ -389,6 +390,8 @@ export async function commitImport(rows, mapping, options = {}) {
  */
 export function resolveAudience(audience = {}) {
   const mode = audience.mode ?? "all";
+  // A broadcast to WhatsApp groups: one message per group, not per person.
+  if (mode === "groups") return resolveGroups(audience);
   let pool;
   if (mode === "contacts") {
     pool = (audience.contactIds ?? []).map((id) => contacts.get(id)).filter(Boolean);

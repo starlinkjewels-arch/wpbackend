@@ -29,13 +29,15 @@ const clamp = (v, lo, hi, d) => {
 };
 
 function cleanAudience(a = {}) {
-  const mode = ["all", "tags", "contacts"].includes(a.mode) ? a.mode : "all";
+  const mode = ["all", "tags", "contacts", "groups"].includes(a.mode) ? a.mode : "all";
   return {
     mode,
     tags: mode === "tags" ? splitTags(a.tags ?? []) : [],
     tagMatch: a.tagMatch === "all" ? "all" : "any",
     contactIds: mode === "contacts" ? [...new Set((a.contactIds ?? []).map(String))].slice(0, 50000) : [],
-    excludeTags: splitTags(a.excludeTags ?? []),
+    excludeTags: mode === "groups" ? [] : splitTags(a.excludeTags ?? []),
+    groupIds: mode === "groups" ? [...new Set((a.groupIds ?? []).map(String).filter((id) => id.endsWith("@g.us")))].slice(0, 500) : [],
+    groupTags: mode === "groups" ? splitTags(a.groupTags ?? []) : [],
   };
 }
 
@@ -63,7 +65,8 @@ function clean(input, prev = {}) {
     maxDelay,
     scheduledAt: merged.scheduledAt ? Number(merged.scheduledAt) : null,
     // AI writes each client their own version of the message (engine/runner.js).
-    ai: { personalize: Boolean(merged.ai?.personalize) },
+    // Groups get one shared message — there is no single client to write it for.
+    ai: { personalize: Boolean(merged.ai?.personalize) && merged.audience?.mode !== "groups" },
   };
 }
 

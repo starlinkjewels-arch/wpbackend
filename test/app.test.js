@@ -492,6 +492,49 @@ async function drain(id, max = 50) {
   assert(again.total === 0 && again.skipped === 1, "a number checked recently is not checked again");
 }
 
+/* ══════ WhatsApp groups and Status ════════════════════════════════════ */
+{
+  const G = await import("../src/data/groups.js");
+  const { groups } = await import("../src/data/collections.js");
+  const { postToStatus } = await import("../src/data/statusPosts.js");
+  await updateSettings({ window: { enabled: false }, restBreak: { enabled: false }, typing: { enabled: false }, dailyLimit: 1000 });
+
+  const sync = await G.syncGroups();
+  assert(sync.count === 5 && groups.size === 5, "groups are synced from WhatsApp");
+  const [dubai, hk, antwerp, vip] = ["120363041111111111@g.us", "120363042222222222@g.us", "120363043333333333@g.us", "120363044444444444@g.us"];
+  assert(!groups.get(antwerp).canSend && groups.get(vip).canSend, "an admins-only group is postable only where we are admin");
+
+  await G.updateGroup(dubai, { tags: ["Buyers"] });
+  await G.updateGroup(antwerp, { tags: ["Buyers"] });
+  await G.syncGroups();
+  assert(groups.get(dubai).tags[0] === "Buyers", "a sync keeps the tags the business added");
+
+  const aud = C.resolveAudience({ mode: "groups", groupTags: ["buyers"], groupIds: [hk] });
+  assert(aud.eligible.length === 2 && aud.excluded.cannotSend === 1, "a group broadcast goes to tagged and picked groups, skipping admins-only ones — " + JSON.stringify(aud.excluded));
+
+  const c = await Camp.createCampaign({ message: "New arrivals for {{group_name}} members — reply here or DM us.", audience: { mode: "groups", groupTags: ["Buyers"], groupIds: [hk] }, ai: { personalize: true }, action: "schedule" });
+  assert(campaigns.get(c.id).ai.personalize === false, "AI per-client writing is off for group broadcasts");
+  const done = await drain(c.id);
+  assert(done.status === "completed" && done.stats.sent === 2, "the broadcast posts once into each group — " + JSON.stringify(done.stats));
+  const { items } = await R.getRecipients(c.id);
+  assert(items.every((r) => r.isGroup) && items.some((r) => r.name === "Dubai Diamond Buyers"), "the campaign page lists the groups by name");
+  assert(groups.get(dubai).lastPostAt > 0, "each group remembers when it was last posted to");
+  assert(!contacts.has("120363041111111111"), "posting to a group never creates a fake client");
+
+  // Members to clients.
+  const before = contacts.size;
+  const imp = await G.importMembers(dubai, { tags: ["Dubai group"] });
+  assert(imp.added > 0 && contacts.size === before + imp.added, "group members are saved as clients — " + JSON.stringify(imp));
+  assert(contacts.get("971501234567").tags.includes("Dubai group"), "members already saved just get the tag");
+  const again = await G.importMembers(dubai, { tags: ["Dubai group"] });
+  assert(again.added === 0, "importing twice adds nobody twice");
+
+  // Status.
+  const post = await postToStatus({ text: "New bridal collection is live ✨", audience: { mode: "all" } });
+  assert(post.viewers > 0 && post.kind === "text", "a status is posted to clients on WhatsApp");
+  await assertRejects(() => postToStatus({ text: "", audience: { mode: "all" } }), "BAD_REQUEST", "an empty status is refused");
+}
+
 /* ══════ Counters under load ═══════════════════════════════════════════ */
 {
   const { bump, getDay, todayKey } = await import("../src/data/stats.js");

@@ -251,6 +251,64 @@ function emitStatus(entry) {
  * Is this number on WhatsApp? For cleaning a client list before a campaign.
  * @returns {Promise<boolean>}
  */
+function needSocket() {
+  if (state.status !== "connected" || !state.sock) throw fail("WhatsApp not connected — scan the QR code first", "NOT_CONNECTED");
+  return state.sock;
+}
+
+/** A group member as a phone number, when WhatsApp tells us one. */
+function memberPhone(p) {
+  const pn = [p.jid, p.id, p.phoneNumber].find((j) => typeof j === "string" && j.endsWith("@s.whatsapp.net"));
+  return pn ? phoneFromJid(pn) : null;
+}
+
+/**
+ * Every group this number is in, with what the app needs to post to it
+ * sensibly: its size, whether we are an admin, and whether only admins may
+ * send (an "announcement" group we cannot post in is not a send target).
+ */
+export async function listGroups() {
+  const sock = needSocket();
+  const all = await sock.groupFetchAllParticipating();
+  const me = [phoneFromJid(sock.user?.id), sock.user?.lid ? sock.user.lid.split("@")[0].split(":")[0] : null].filter(Boolean);
+  const isMe = (p) => me.includes(phoneFromJid(p.id)) || me.includes(memberPhone(p));
+  return Object.values(all ?? {}).map((g) => {
+    const mine = (g.participants ?? []).find(isMe);
+    const iAmAdmin = Boolean(mine?.admin);
+    return {
+      id: g.id,
+      name: g.subject || "Unnamed group",
+      description: typeof g.desc === "string" ? g.desc.slice(0, 500) : "",
+      size: g.size ?? g.participants?.length ?? 0,
+      announce: Boolean(g.announce),
+      isCommunity: Boolean(g.isCommunity),
+      isCommunityAnnounce: Boolean(g.isCommunityAnnounce),
+      iAmAdmin,
+      canSend: !g.announce || iAmAdmin,
+      createdAt: g.creation ? Number(g.creation) * 1000 : null,
+      members: (g.participants ?? []).map((p) => ({ phone: memberPhone(p), admin: p.admin ?? null, me: isMe(p) })),
+    };
+  });
+}
+
+/**
+ * Post to WhatsApp Status. Status goes to an explicit list of people — WhatsApp
+ * then shows it to those of them who also have this number saved.
+ */
+export async function postStatus({ text, media, caption, jids, backgroundColor = "#0b7a5c", font = 1 }) {
+  const sock = needSocket();
+  let content;
+  if (media?.buffer) {
+    const type = media.mimetype || "";
+    content = type.startsWith("video/") ? { video: media.buffer, mimetype: type, caption: caption || "" } : { image: media.buffer, mimetype: type, caption: caption || "" };
+  } else {
+    if (!text?.trim()) throw fail("Write something for the status", "BAD_REQUEST");
+    content = { text };
+  }
+  const sent = await sock.sendMessage("status@broadcast", content, { statusJidList: jids, broadcast: true, backgroundColor, font });
+  return { messageId: sent?.key?.id ?? null };
+}
+
 export async function checkNumber(phone) {
   if (state.status !== "connected" || !state.sock) throw fail("WhatsApp not connected", "NOT_CONNECTED");
   const [known] = (await state.sock.onWhatsApp(toJid(phone))) ?? [];
@@ -528,7 +586,7 @@ export async function sendMessage({ phone, jid: directJid, message, pdfBase64, f
     }
 
     let target;
-    if (directJid?.endsWith("@lid")) {
+    if (directJid?.endsWith("@g.us") || directJid?.endsWith("@lid")) {
       // Someone who wrote to us from a hidden number: they exist, and their
       // chat address is the only way to answer them.
       target = directJid;

@@ -94,7 +94,10 @@ export const mediaIndex = new CachedCollection("waMedia");
 export const dailyStats = new CachedCollection("waStats");
 export const settingsCol = new CachedCollection("waSettings");
 
-const ALL = [contacts, campaigns, templates, conversations, mediaIndex, dailyStats, settingsCol];
+export const groups = new CachedCollection("waGroups");
+export const statusPosts = new CachedCollection("waStatusPosts");
+
+const ALL = [contacts, campaigns, templates, conversations, mediaIndex, dailyStats, settingsCol, groups, statusPosts];
 
 export const dataState = { ready: false, error: null };
 
